@@ -1,11 +1,18 @@
 // ignore_for_file: prefer_const_constructors, prefer_const_literals_to_create_immutables
-// import 'package:http/http.dart' as http;
+import 'dart:async';
+
+import 'package:http/http.dart' as http;
+import 'package:dice_reader/model/user.dart';
 import 'package:english_words/english_words.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:provider/provider.dart';
+import'package:dice_reader/pixel_calls/pixel_calls.dart';
+import 'dart:convert' as convert;
 
-void main() {
+Future main() async{
+  WidgetsFlutterBinding.ensureInitialized();
+
   runApp(MyApp());
 }
 
@@ -76,6 +83,12 @@ class ToggleButtonsRolls extends StatefulWidget {
 
 class _MyHomePageState extends State<MyHomePage> {
   var selectedIndex = 0;
+
+
+  @override
+  void initState() {
+    super.initState();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -307,8 +320,10 @@ class HistoryListView extends StatefulWidget {
 }
 
 class _ToggleButtonsRollState extends State<ToggleButtonsRolls>{
-  // final List<bool> _selectedRolls = <bool>[true, false, false, false, false];
+  late Sse _sse;
+  late StreamSubscription _sseStreamSubscription;
   bool vertical = false;
+  int? roll = 0;
   Map<String, dynamic> map = {
     "No bonus": Icons.square,
     "Attack": Icons.api,
@@ -317,11 +332,75 @@ class _ToggleButtonsRollState extends State<ToggleButtonsRolls>{
     "Will": Icons.auto_fix_high_sharp
   };
   List<bool> _selectedRolls = [];
+  var currentBonus = 0;
+  var totalRoll = 0;
+  var bonuseType = '';
+  List<RollBonuses> bonuses = <RollBonuses>[];
 
   @override
   void initState() {
     super.initState();
     _selectedRolls = List.filled(map.length, false);
+    getBonusesFromSheet();
+    print('attempting to connect');
+    _connectToSse();        
+  }
+
+  void _connectToSse() async {
+      final sseUri = Uri.parse(''); // Include ip if on same network
+      print('Before sse await connect');
+      _sse = await Sse.connect(uri: sseUri);
+      print('first connection');
+
+      _sseStreamSubscription = _sse.stream.listen((event) {
+        print('Listening on /listen');
+        String eventData = event;
+        int? roll = int.tryParse(eventData);
+        if (roll != null) {
+          // Use the integer
+          setState(() {
+            totalRoll = roll + currentBonus;
+          });
+          print('received roll: $roll');
+          print('$bonuseType  $totalRoll');
+        }
+        // Handle received events
+        // print('Received event: $event');
+        }, onError: (error) {
+          // Handle SSE stream errors
+          print('SSE error: $error');
+        }, onDone: () {
+          // Handle SSE stream completion
+          // print('SSE stream closed. Reconnecting');
+          _connectToSse();
+      });
+    }
+
+  
+  @override
+  void dispose() {
+    _sse.close();
+    _sseStreamSubscription.cancel();
+    super.dispose();
+  }
+
+  getBonusesFromSheet() async {
+    bonuses.clear();
+    var raw = await http.get(Uri.parse(''));
+    
+    var jsonBonuses = convert.jsonDecode(raw.body);
+    print('These are the json bonuses $jsonBonuses');
+    print(jsonBonuses.runtimeType);
+    RollBonuses rollBonuses = RollBonuses();
+    rollBonuses.attackBonus = jsonBonuses['attackBonus'];
+    rollBonuses.fortBonus = jsonBonuses['fortBonus'];
+    rollBonuses.reflexBonus = jsonBonuses['refBonus'];
+    rollBonuses.willBonus = jsonBonuses['willBonus'];
+    jsonBonuses.forEach((key, value){
+      print('Single bonus $key, $value');});
+
+    bonuses.add(rollBonuses);
+
   }
 
   @override
@@ -329,7 +408,7 @@ class _ToggleButtonsRollState extends State<ToggleButtonsRolls>{
     return Wrap(
       children: [
         ToggleButtons(
-          isSelected: _selectedRolls, // _selectedRolls.sublist(0,2)          
+          isSelected: _selectedRolls,        
           selectedColor: Colors.blueGrey,
           children: [
             ...map.entries.map((ele) {
@@ -342,12 +421,41 @@ class _ToggleButtonsRollState extends State<ToggleButtonsRolls>{
               );
             }).toList(),
           ],
-          onPressed: (value) { // This may be where we get the bonuses from Sheets?
-            setState(() {
+          onPressed: (value) {
+            setState(() { // Add call to update bonuses
+              getBonusesFromSheet().then((_){
+                  switch (value){
+                    case 0:
+                      currentBonus = 0;
+                      bonuseType = 'No bonus';
+                      print('Rolling with no bonus ');  
+                    case 1:
+                      currentBonus = bonuses[0].attackBonus;
+                      bonuseType = 'Attack roll: ';
+                      print('Bonuse set to Attack roll');  
+                    case 2:
+                      // Set bonus value = fort
+                      currentBonus = bonuses[0].fortBonus;
+                      bonuseType = 'Foritude Save: ';
+                      print('Bonuse set to Fortitude Save');  
+                    case 3:
+                      // Set bonus value = ref
+                      currentBonus = bonuses[0].reflexBonus;
+                      bonuseType = 'Reflex Save: ';
+                      bonuseType = 'Attack';
+                      print('Bonuse set to Reflex Save');  
+                    case 4:
+                      // Set bonus value = will   
+                      currentBonus = bonuses[0].willBonus;
+                      bonuseType = 'Will Save: ';
+                      print('Bonuse set to Will Save');                  
+                    default:
+                      break;
+            }
               _selectedRolls = List.filled(map.length, false);
               _selectedRolls[value] = true;
             });
-          
+          });
           },
         ),
       ],
