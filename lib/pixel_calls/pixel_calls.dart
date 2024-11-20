@@ -7,7 +7,6 @@ class Sse {
   late http.Client _client;
   late http.StreamedResponse _response;
   late Uri _uri;
-  bool _isConnected = false;
 
   Sse._(this._client, this._response, this._uri) {
     _handleEvents();
@@ -36,41 +35,32 @@ class Sse {
   }
 
   void _handleEvents() {
-    print('handle events called');
-    _response.stream.transform(utf8.decoder).transform(const LineSplitter()).listen(
-      (event) {
-        print('Handling event $event');
-        _streamController.add(event); // Forward the event to the stream controller
+    String buffer = '';
+    
+    _response.stream.transform(utf8.decoder).listen(
+      (String data) {
+        buffer += data;
+        if (buffer.contains('\n\n')) {
+          var parts = buffer.split('\n\n');
+          for (var i = 0; i < parts.length - 1; i++) {
+            var part = parts[i].trim();
+            if (part.startsWith('data: ')) {
+              var eventData = part.substring(6);
+              if (eventData.contains('"heartbeat":true')) continue;
+              _streamController.add(eventData);
+            }
+          }
+          buffer = parts.last;
+        }
       },
       onError: (error) {
-        print('Error encountered');
-        _streamController.addError(error); // Forward errors to the stream controller
-        _reconnect(); // Attempt reconnection on error
+        _streamController.addError(error);
       },
       onDone: () {
-        print('Stream done. onDone and reconnecting.');
-        _streamController.close(); // Close the stream controller
-        _reconnect(); // Attempt reconnection on stream closure
+        _streamController.addError('Connection closed');
       },
     );
   }
 
-void _reconnect() {
-  if (!_isConnected) {
-    _isConnected = true; // Set the connection state to indicate reconnection attempt
-    _streamController.add('Reconnecting...'); // Notify the stream about reconnection attempt
-    _response.stream.drain().then((_) {
-      _client.send(http.Request('GET', _uri)).then((newResponse) {
-        _response = newResponse;
-        _handleEvents(); // Re-establish event handling on the new response stream
-        _isConnected = false; // Reset the connection state after successful reconnection
-      }).catchError((error) {
-        _streamController.addError(error); // Forward reconnection errors to the stream controller
-      });
-    }).catchError((error) {
-      _streamController.addError(error); // Forward drain errors to the stream controller
-    });
-  }
-}
-
+  Uri get uri => _uri;
 }

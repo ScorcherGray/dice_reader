@@ -5,7 +5,6 @@ import 'package:http/http.dart' as http;
 import 'package:dice_reader/model/user.dart';
 import 'package:english_words/english_words.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/rendering.dart';
 import 'package:provider/provider.dart';
 import 'package:dice_reader/pixel_calls/pixel_calls.dart';
 import 'dart:convert' as convert;
@@ -41,12 +40,22 @@ class MyAppState extends ChangeNotifier {
   var history = <WordPair>[];
   var rollTotal = 0;
   var rollBonus = 0;
-  late Sse _sse;
+  Sse? _sse;
   var bonuses = [];
-  late StreamSubscription _sseStreamSubscription;
+  StreamSubscription<String>? _sseStreamSubscription;
   String buttonText = 'No roll selected: ';
 
   GlobalKey? historyListKey;
+
+  int _retryCount = 0;
+  static const int maxRetries = 5;
+  
+  bool isConnected = false;
+  String connectionStatus = 'Connecting...';
+  
+  RollBonuses? _currentBonuses;
+  bool _isLoadingBonuses = false;
+  String _bonusError = '';
 
   MyAppState() {
     connectToSse();
@@ -63,107 +72,147 @@ class MyAppState extends ChangeNotifier {
   void updateBonus(var bonus, String newText) {
     rollBonus = bonus;
     buttonText = newText;
+    print('Updated bonus to : $rollBonus'); // Debug Log
     notifyListeners();
   }
 
-  void handleBonusAndText(var value) {
+  Future<void> refreshBonuses() async {
+    _isLoadingBonuses = true;
+    _bonusError = '';
+    notifyListeners();
+
+    try {
+      final response = await http.get(
+        Uri.parse('https://script.google.com/macros/s/AKfycbzaSs3mrDRmOtfGcZEpDu4BAle8f6h8VBRfEoribPsDHqsCkM6zC2ntelhcdtmf21le-A/exec'),
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+        },
+      );
+      
+      print('Response status: ${response.statusCode}');
+      print('Response body: ${response.body}');
+      
+      if (response.statusCode == 200) {
+        final jsonBonuses = convert.jsonDecode(response.body);
+        _currentBonuses = RollBonuses.fromJson(jsonBonuses);
+      } else {
+        _bonusError = 'Failed to load bonuses: ${response.statusCode}';
+      }
+    } catch (e) {
+      print('Error details: $e');
+      _bonusError = 'Error loading bonuses: $e';
+    } finally {
+      _isLoadingBonuses = false;
+      notifyListeners();
+    }
+  }
+
+  void handleBonusAndText(int value) async {
+    // Refresh bonuses before applying selection
+    await refreshBonuses();
+    
+    if (_bonusError.isNotEmpty) {
+      print('Error refreshing bonuses: $_bonusError');
+      return;
+    }
+
+    final bonuses = _currentBonuses;
+    if (bonuses == null) {
+      print('No bonuses available');
+      return;
+    }
+
     switch (value) {
       case 0:
         updateBonus(0, 'No Bonus: ');
-        print('Rolling with no bonus');  
-        break;
       case 1:
-        updateBonus(bonuses[0].attackBonus, 'Attack Roll: ');
-        print('Bonus set to Attack roll');   
-        break;
+        updateBonus(bonuses.attackBonus, 'Attack Roll: ');
       case 2:
-        updateBonus(bonuses[0].fortBonus, 'Fortitude Save: ');
-        print('Bonus set to Fortitude Save');   
-        break;
+        updateBonus(bonuses.fortBonus, 'Fortitude Save: ');
       case 3:
-        updateBonus(bonuses[0].reflexBonus, 'Reflex Save: ');
-        print('Bonus set to Reflex Save');  
-        break; 
+        updateBonus(bonuses.reflexBonus, 'Reflex Save: ');
       case 4:
-        updateBonus(bonuses[0].willBonus, 'Will Save: ');
-        print('Bonus set to Will Save');  
-        break;
-      default:
-        break;
+        updateBonus(bonuses.willBonus, 'Will Save: ');
     }
   }
 
   void connectToSse() async {
-      final sseUri = Uri.parse(':5000/listen'); // Include ip if on same network
-      print('Before sse await connect');
-      try{
-        _sse = await Sse.connect(uri: sseUri);
-        print('first connection');
-        // I know connection is getting called and the listen endpoint is being hit
-        // Yet this _sse.stream.listen event is not getting the value.
-        _sseStreamSubscription = _sse.stream.listen((event) {
-          print('Listening on stream');
-          String eventData = event;
-          print('Before Mapping');
-          Map<String, dynamic> eventDataMap = convert.jsonDecode(eventData);
-          print('After mapping');
-          int? roll = eventDataMap['roll'];
-          print('Received eventData $eventData');
-          if (roll != null) {
-            // Use the integer
-            rollTotal = roll + rollBonus;
-            print('received roll: $roll');
-            notifyListeners();
-          }
-          else if(roll == null){
-            print('parse to int failed and roll is null');
-          }
-          else{
-            print('parse failed for non-null reason');
-          }
-          // Handle received events
-          // print('Received event: $event');
-          }, onError: (error) {
-            // Handle SSE stream errors
-            print('SSE error: $error');
-          }, onDone: () {
-            // Handle SSE stream completion
-            print('SSE stream closed. Reconnecting');
-            connectToSse();
-      });
-      } catch (e) {
-        print('Error initializing SSE connection: $e');
-        // Possible future error handling
+    connectionStatus = 'Connecting...';
+    notifyListeners();
+    
+    final sseUri = Uri.parse('http://192.168.1.107:5000/listen');
+    try {
+      if (_sseStreamSubscription != null) {
+        await _sseStreamSubscription!.cancel();
       }
+      
+      _sse = await Sse.connect(uri: sseUri);
+      isConnected = true;
+      connectionStatus = 'Connected';
+      notifyListeners();
+      _retryCount = 0;
+      
+      _sseStreamSubscription = _sse!.stream.listen(
+        (String eventData) {
+          try {
+            print('Received event data: $eventData');
+            Map<String, dynamic> eventDataMap = convert.jsonDecode(eventData);
+            int roll = eventDataMap['roll'] ?? -1;
+            print('Parsed roll: $roll, current bonus: $rollBonus');
+            if (roll != -1) {
+              rollTotal = roll + rollBonus;
+              print('New total: $rollTotal');
+              notifyListeners();
+            }
+          } catch (e) {
+            print('Error parsing event data: $e');
+          }
+        },
+        onError: (error) {
+          print('SSE error: $error');
+          _handleReconnect();
+        },
+        onDone: () {
+          print('SSE connection closed');
+          _handleReconnect();
+        },
+      );
+    } catch (e) {
+      print('Connection error: $e');
+      connectionStatus = 'Connection failed';
+      isConnected = false;
+      notifyListeners();
+      _handleReconnect();
     }
-
-  
-  @override
-  void dispose() {
-    _sse.close();
-    _sseStreamSubscription.cancel();
-    super.dispose();
   }
 
-  Future<void> getBonusesFromSheet() async {
-    bonuses.clear();
-    var raw = await http.get(Uri.parse('https://script.google.com/macros/s//exec')); // include path for google sheet
-    
-    var jsonBonuses = convert.jsonDecode(raw.body);
-    print('These are the json bonuses $jsonBonuses');
-    print(jsonBonuses.runtimeType);
-    RollBonuses rollBonuses = RollBonuses();
-    rollBonuses.attackBonus = jsonBonuses['attackBonus'];
-    rollBonuses.fortBonus = jsonBonuses['fortBonus'];
-    rollBonuses.reflexBonus = jsonBonuses['refBonus'];
-    rollBonuses.willBonus = jsonBonuses['willBonus'];
+  void _handleReconnect() {
+    if (_retryCount < maxRetries) {
+      int delaySeconds = 1 << _retryCount;
+      connectionStatus = 'Reconnecting in $delaySeconds seconds...';
+      notifyListeners();
+      
+      Future.delayed(
+        Duration(seconds: delaySeconds),
+        () {
+          _retryCount++;
+          connectToSse();
+        },
+      );
+    } else {
+      connectionStatus = 'Connection failed. Please check your connection.';
+      notifyListeners();
+    }
+  }
 
-    jsonBonuses.forEach((key, value){
-      print('Single bonus $key, $value');
-    });
-
-    bonuses.add(rollBonuses);
-
+  @override
+  void dispose() {
+    if (_sseStreamSubscription != null) {
+      _sseStreamSubscription!.cancel();
+    }
+    _sse?.close();
+    super.dispose();
   }
 
   var savedRolls = <WordPair>[];
@@ -326,16 +375,19 @@ class GeneratorPage extends StatelessWidget {
 class BigCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
-    return Consumer<MyAppState>(
-      builder: (context, myAppState, child) {
-        var theme = Theme.of(context);
-        var style = theme.textTheme.displayMedium!.copyWith(
-          color: theme.colorScheme.onPrimary,
-        );
-
-        return Card(
-          color: theme.colorScheme.primary,
-          child: Padding(
+    var appState = context.watch<MyAppState>();
+    
+    return Card(
+      child: Column(
+        children: [
+          if (appState._isLoadingBonuses)
+            CircularProgressIndicator(),
+          if (appState._bonusError.isNotEmpty)
+            Text(
+              appState._bonusError,
+              style: TextStyle(color: Colors.red),
+            ),
+          Padding(
             padding: const EdgeInsets.all(20),
             child: AnimatedSize(
               duration: Duration(milliseconds: 200),
@@ -343,20 +395,24 @@ class BigCard extends StatelessWidget {
                 child: Wrap(
                   children: [
                     Text(
-                      myAppState.buttonText, 
-                      style: style.copyWith(fontWeight: FontWeight.w200),
+                      appState.buttonText, 
+                      style: Theme.of(context).textTheme.displayMedium!.copyWith(
+                        color: Theme.of(context).colorScheme.onPrimary,
+                      ),
                     ),
                     Text(
-                      myAppState.rollTotal.toString(), 
-                      style: style.copyWith(fontWeight: FontWeight.w200),
+                      appState.rollTotal.toString(), 
+                      style: Theme.of(context).textTheme.displayMedium!.copyWith(
+                        color: Theme.of(context).colorScheme.onPrimary,
+                      ),
                     ),
                   ],
                 ),
               ),
             ),
           ),
-        );
-      },
+        ], // Children
+      ),
     );
   }
 }
@@ -452,7 +508,7 @@ class _ToggleButtonsRollState extends State<ToggleButtonsRolls>{
             );
           }).toList(),
           onPressed: (value) async{            
-            await appState.getBonusesFromSheet();
+            await appState.refreshBonuses();
             setState(() {
               appState.handleBonusAndText(value);
               _selectedRolls = List.filled(map.length, false);
