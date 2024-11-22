@@ -3,7 +3,6 @@ import 'dart:async';
 
 import 'package:http/http.dart' as http;
 import 'package:dice_reader/model/user.dart';
-import 'package:english_words/english_words.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:dice_reader/pixel_calls/pixel_calls.dart';
@@ -15,6 +14,22 @@ Future main() async{
   runApp(MyApp());
 }
 
+// Add this class near the top of the file
+class RollHistory {
+  final int total;
+  final int roll;
+  final int bonus;
+  final String rollType;
+  final DateTime timestamp;
+
+  RollHistory({
+    required this.total,
+    required this.roll,
+    required this.bonus,
+    required this.rollType,
+    required this.timestamp,
+  });
+}
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
@@ -40,12 +55,10 @@ class MyApp extends StatelessWidget {
 }
 
 class MyAppState extends ChangeNotifier {
-  var current = WordPair.random();
-  var history = <WordPair>[];
+  var history = <RollHistory>[];  // Initialize as empty RollHistory list
   var rollTotal = 0;
   var rollBonus = 0;
   Sse? _sse;
-  var bonuses = [];
   StreamSubscription<String>? _sseStreamSubscription;
   String buttonText = 'No roll selected: ';
 
@@ -61,16 +74,14 @@ class MyAppState extends ChangeNotifier {
   bool _isLoadingBonuses = false;
   String _bonusError = '';
 
+  DateTime? _lastBonusRefresh;
+  static const Duration refreshInterval = Duration(minutes: 2);  // Adjust as needed
+
+  static const int maxHistoryLength = 12;
+
   MyAppState() {
     connectToSse();
-  }
-
-  void getNext() {
-    history.insert(0, current);
-    var animatedList = historyListKey?.currentState as AnimatedListState?;
-    animatedList?.insertItem(0);
-    current = WordPair.random();
-    notifyListeners();
+    refreshBonuses();  // Prefetch bonuses immediately
   }
 
   void updateBonus(var bonus, String newText) {
@@ -81,6 +92,12 @@ class MyAppState extends ChangeNotifier {
   }
 
   Future<void> refreshBonuses() async {
+    // Only refresh if we haven't fetched recently
+    if (_lastBonusRefresh != null && 
+        DateTime.now().difference(_lastBonusRefresh!) < refreshInterval) {
+      return;  // Use cached bonuses
+    }
+
     _isLoadingBonuses = true;
     _bonusError = '';
     notifyListeners();
@@ -100,6 +117,7 @@ class MyAppState extends ChangeNotifier {
       if (response.statusCode == 200) {
         final jsonBonuses = convert.jsonDecode(response.body);
         _currentBonuses = RollBonuses.fromJson(jsonBonuses);
+        _lastBonusRefresh = DateTime.now();
       } else {
         _bonusError = 'Failed to load bonuses: ${response.statusCode}';
       }
@@ -113,7 +131,12 @@ class MyAppState extends ChangeNotifier {
   }
 
   void handleBonusAndText(int value) async {
-    // Refresh bonuses before applying selection
+    // Update UI immediately with loading state
+    buttonText = 'Loading...';
+    rollTotal = 0;  // Reset the roll total when a new button is pressed
+    notifyListeners();
+    
+    // Refresh bonuses in background
     await refreshBonuses();
     
     if (_bonusError.isNotEmpty) {
@@ -127,6 +150,7 @@ class MyAppState extends ChangeNotifier {
       return;
     }
 
+    // Update with actual bonus
     switch (value) {
       case 0:
         updateBonus(0, 'No Bonus: ');
@@ -166,6 +190,7 @@ class MyAppState extends ChangeNotifier {
             print('Parsed roll: $roll, current bonus: $rollBonus');
             if (roll != -1) {
               rollTotal = roll + rollBonus;
+              addToHistory(roll);  // Add to history when roll is received
               print('New total: $rollTotal');
               notifyListeners();
             }
@@ -212,27 +237,28 @@ class MyAppState extends ChangeNotifier {
 
   @override
   void dispose() {
-    if (_sseStreamSubscription != null) {
-      _sseStreamSubscription!.cancel();
-    }
+    _sseStreamSubscription?.cancel();
     _sse?.close();
     super.dispose();
   }
 
-  var savedRolls = <WordPair>[];
-
-  void toggleFavorite([WordPair? pair]) {
-    pair = pair ?? current;
-    if (savedRolls.contains(pair)) {
-      savedRolls.remove(pair);
-    } else {
-      savedRolls.add(pair);
+  void addToHistory(int roll) {
+    if (history.length >= maxHistoryLength) {
+      history.removeLast();
     }
-    notifyListeners();
-  }
-
-  void removeRoll(WordPair pair) {
-    savedRolls.remove(pair);
+    
+    history.insert(0, RollHistory(
+      total: rollTotal,
+      roll: roll,
+      bonus: rollBonus,
+      rollType: buttonText.replaceAll(':', '').trim(),
+      timestamp: DateTime.now(),
+    ));
+    
+    var animatedList = historyListKey?.currentState as AnimatedListState?;
+    if (animatedList != null) {
+      animatedList.insertItem(0);
+    }
     notifyListeners();
   }
 }
@@ -251,97 +277,52 @@ class ToggleButtonsRolls extends StatefulWidget {
 }
 
 class _MyHomePageState extends State<MyHomePage> {
-  var selectedIndex = 0;
-
-  @override
-  void initState() {
-    super.initState();
-  }
-
   @override
   Widget build(BuildContext context) {
     var colorScheme = Theme.of(context).colorScheme;
-
-    Widget page;
-    switch (selectedIndex) {
-      case 0:
-        page = GeneratorPage();
-      case 1:
-        page = FavoritesPage();
-      default:
-        throw UnimplementedError('no widget for $selectedIndex');
-    }
-
-    // The container for the current page, with its background color
-    // and subtle switching animation.
-    var mainArea = ColoredBox(
-      color: colorScheme.surfaceVariant,
-      child: AnimatedSwitcher(
-        duration: Duration(milliseconds: 200),
-        child: page,
-      ),
-    );
+    var appState = context.watch<MyAppState>();
 
     return Scaffold(
-      body: LayoutBuilder(
-        builder: (context, constraints) {
-          if (constraints.maxWidth < 450) {
-            // Use a more mobile-friendly layout with BottomNavigationBar
-            // on narrow screens.
-            return Column(
-              children: [
-                Expanded(child: mainArea),
-                SafeArea(
-                  child: BottomNavigationBar(
-                    items: [
-                      BottomNavigationBarItem(
-                        icon: Icon(Icons.home),
-                        label: 'Home',
-                      ),
-                      BottomNavigationBarItem(
-                        icon: Icon(Icons.book_online_sharp),
-                        label: 'History',
-                      ),
-                    ],
-                    currentIndex: selectedIndex,
-                    onTap: (value) {
-                      setState(() {
-                        selectedIndex = value;
-                      });
-                    },
+      appBar: AppBar(
+        title: Text('Roll Bonuses'),
+        actions: [
+          IconButton(
+            icon: Icon(Icons.refresh),
+            tooltip: 'Refresh Bonuses',
+            onPressed: () async {
+              appState._lastBonusRefresh = null;
+              await appState.refreshBonuses();
+              
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    appState._bonusError.isEmpty 
+                      ? 'Bonuses refreshed!' 
+                      : 'Error: ${appState._bonusError}'
                   ),
-                )
-              ],
-            );
-          } else {
-            return Row(
-              children: [
-                SafeArea(
-                  child: NavigationRail(
-                    extended: constraints.maxWidth >= 600,
-                    destinations: [
-                      NavigationRailDestination(
-                        icon: Icon(Icons.home),
-                        label: Text('Home'),
-                      ),
-                      NavigationRailDestination(
-                        icon: Icon(Icons.book_online_sharp),
-                        label: Text('History'),
-                      ),
-                    ],
-                    selectedIndex: selectedIndex,
-                    onDestinationSelected: (value) {
-                      setState(() {
-                        selectedIndex = value;
-                      });
-                    },
-                  ),
+                  duration: Duration(seconds: 2),
+                  behavior: SnackBarBehavior.floating,
                 ),
-                Expanded(child: mainArea),
-              ],
-            );
-          }
-        },
+              );
+            },
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Expanded(
+            flex: 1,
+            child: BigCard(),
+          ),
+          Expanded(
+            flex: 3,
+            child: HistoryListView(),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: ToggleButtonsRolls(),
+          ),
+        ],
       ),
     );
   }
@@ -382,52 +363,58 @@ class BigCard extends StatelessWidget {
     var appState = context.watch<MyAppState>();
     
     return Card(
-      color: Theme.of(context).colorScheme.primaryContainer,  // Dark background
-      elevation: 8,  // Add some shadow
-      margin: EdgeInsets.all(16),  // Add some margin
-      child: Column(
-        children: [
-          if (appState._isLoadingBonuses)
-            Padding(
-              padding: const EdgeInsets.all(8.0),
-              child: CircularProgressIndicator(),
-            ),
-          if (appState._bonusError.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.all(8.0),
-              child: Text(
-                appState._bonusError,
-                style: TextStyle(color: Colors.red[300]),  // Lighter red for dark theme
+      color: Theme.of(context).colorScheme.primaryContainer,
+      elevation: 8,
+      margin: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Container(
+        padding: EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+        constraints: BoxConstraints.expand(),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          mainAxisSize: MainAxisSize.max,
+          children: [
+            if (appState._isLoadingBonuses)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4.0),
+                child: CircularProgressIndicator(),
               ),
-            ),
-          Padding(
-            padding: const EdgeInsets.all(24),  // Increased padding
-            child: AnimatedSize(
+            if (appState._bonusError.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4.0),
+                child: Text(
+                  appState._bonusError,
+                  style: TextStyle(color: Colors.red[300]),
+                ),
+              ),
+            AnimatedSize(
               duration: Duration(milliseconds: 200),
               child: MergeSemantics(
-                child: Wrap(
-                  spacing: 12,  // Add space between text elements
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     Text(
                       appState.buttonText, 
-                      style: Theme.of(context).textTheme.headlineMedium!.copyWith(
+                      style: Theme.of(context).textTheme.headlineLarge!.copyWith(
                         color: Theme.of(context).colorScheme.onPrimaryContainer,
-                        fontWeight: FontWeight.bold,  // Make text bolder
+                        fontWeight: FontWeight.bold,
+                        fontSize: 32,
                       ),
                     ),
+                    SizedBox(width: 12),
                     Text(
-                      appState.rollTotal.toString(), 
-                      style: Theme.of(context).textTheme.headlineMedium!.copyWith(
+                      appState.rollTotal.toString(),
+                      style: Theme.of(context).textTheme.headlineLarge!.copyWith(
                         color: Theme.of(context).colorScheme.onPrimaryContainer,
-                        fontWeight: FontWeight.bold,  // Make text bolder
+                        fontWeight: FontWeight.bold,
+                        fontSize: 32,
                       ),
                     ),
                   ],
                 ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -439,7 +426,7 @@ class FavoritesPage extends StatelessWidget {
     var theme = Theme.of(context);
     var appState = context.watch<MyAppState>();
 
-    if (appState.savedRolls.isEmpty) {
+    if (appState.history.isEmpty) {
       return Center(
         child: Text('No rolls yet.'),
       );
@@ -450,29 +437,28 @@ class FavoritesPage extends StatelessWidget {
       children: [
         Padding(
           padding: const EdgeInsets.all(30),
-          child: Text('You have '
-              '${appState.savedRolls.length} rolls:'),
+          child: Text('You have ${appState.history.length} rolls:'),
         ),
         Expanded(
-          // Make better use of wide windows with a grid.
           child: GridView(
             gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
               maxCrossAxisExtent: 400,
               childAspectRatio: 400 / 80,
             ),
             children: [
-              for (var rollTotal in appState.savedRolls)
+              for (var rollHistory in appState.history)
                 ListTile(
                   leading: IconButton(
                     icon: Icon(Icons.delete_outline, semanticLabel: 'Delete'),
                     color: theme.colorScheme.primary,
                     onPressed: () {
-                      appState.removeRoll(rollTotal);
+                      appState.history.remove(rollHistory);
+                      appState.notifyListeners();
                     },
                   ),
                   title: Text(
-                    rollTotal.asLowerCase,
-                    semanticsLabel: rollTotal.asPascalCase,
+                    rollHistory.rollType,
+                    semanticsLabel: rollHistory.rollType,
                   ),
                 ),
             ],
@@ -606,11 +592,10 @@ class _HistoryListViewState extends State<HistoryListView> {
   Widget build(BuildContext context) {
     final appState = context.watch<MyAppState>();
     appState.historyListKey = _key;
+    final theme = Theme.of(context);
 
     return ShaderMask(
       shaderCallback: (bounds) => _maskingGradient.createShader(bounds),
-      // This blend mode takes the opacity of the shader (i.e. our gradient)
-      // and applies it to the destination (i.e. our animated list).
       blendMode: BlendMode.dstIn,
       child: AnimatedList(
         key: _key,
@@ -618,20 +603,30 @@ class _HistoryListViewState extends State<HistoryListView> {
         padding: EdgeInsets.only(top: 100),
         initialItemCount: appState.history.length,
         itemBuilder: (context, index, animation) {
-          final pair = appState.history[index];
+          final rollHistory = appState.history[index];
           return SizeTransition(
             sizeFactor: animation,
-            child: Center(
-              child: TextButton.icon(
-                onPressed: () {
-                  appState.toggleFavorite(pair);
-                },
-                icon: appState.savedRolls.contains(pair)
-                    ? Icon(Icons.favorite, size: 12)
-                    : SizedBox(),
-                label: Text(
-                  pair.asLowerCase,
-                  semanticsLabel: pair.asPascalCase,
+            child: Card(
+              margin: EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+              child: ListTile(
+                leading: CircleAvatar(
+                  child: Text(
+                    rollHistory.roll.toString(),
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  backgroundColor: theme.colorScheme.primaryContainer,
+                ),
+                title: Text(
+                  '${rollHistory.rollType} Total: ${rollHistory.total}',
+                  style: theme.textTheme.bodyLarge,
+                ),
+                subtitle: Text(
+                  'Bonus: ${rollHistory.bonus}',
+                  style: theme.textTheme.bodyMedium,
+                ),
+                trailing: Text(
+                  _formatTimestamp(rollHistory.timestamp),
+                  style: theme.textTheme.bodySmall,
                 ),
               ),
             ),
@@ -639,5 +634,19 @@ class _HistoryListViewState extends State<HistoryListView> {
         },
       ),
     );
+  }
+
+  String _formatTimestamp(DateTime timestamp) {
+    final now = DateTime.now();
+    final difference = now.difference(timestamp);
+    if (difference.inMinutes < 1) {
+      return 'Just now';
+    } else if (difference.inHours < 1) {
+      return '${difference.inMinutes}m ago';
+    } else if (difference.inHours < 24) {
+      return '${difference.inHours}h ago';
+    } else {
+      return '${difference.inDays}d ago';
+    }
   }
 }
