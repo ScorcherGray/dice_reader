@@ -27,7 +27,11 @@ class MyApp extends StatelessWidget {
         title: 'Roll Bonuses',
         theme: ThemeData(
           useMaterial3: true,
-          colorScheme: ColorScheme.fromSeed(seedColor: Colors.green),
+          colorScheme: ColorScheme.fromSeed(
+            seedColor: Colors.green,
+            brightness: Brightness.dark,  // Dark theme
+            primary: Colors.green[700],   // Darker green
+          ),
         ),
         home: MyHomePage(),
       ),
@@ -378,32 +382,44 @@ class BigCard extends StatelessWidget {
     var appState = context.watch<MyAppState>();
     
     return Card(
+      color: Theme.of(context).colorScheme.primaryContainer,  // Dark background
+      elevation: 8,  // Add some shadow
+      margin: EdgeInsets.all(16),  // Add some margin
       child: Column(
         children: [
           if (appState._isLoadingBonuses)
-            CircularProgressIndicator(),
+            Padding(
+              padding: const EdgeInsets.all(8.0),
+              child: CircularProgressIndicator(),
+            ),
           if (appState._bonusError.isNotEmpty)
-            Text(
-              appState._bonusError,
-              style: TextStyle(color: Colors.red),
+            Padding(
+              padding: const EdgeInsets.all(8.0),
+              child: Text(
+                appState._bonusError,
+                style: TextStyle(color: Colors.red[300]),  // Lighter red for dark theme
+              ),
             ),
           Padding(
-            padding: const EdgeInsets.all(20),
+            padding: const EdgeInsets.all(24),  // Increased padding
             child: AnimatedSize(
               duration: Duration(milliseconds: 200),
               child: MergeSemantics(
                 child: Wrap(
+                  spacing: 12,  // Add space between text elements
                   children: [
                     Text(
                       appState.buttonText, 
-                      style: Theme.of(context).textTheme.displayMedium!.copyWith(
-                        color: Theme.of(context).colorScheme.onPrimary,
+                      style: Theme.of(context).textTheme.headlineMedium!.copyWith(
+                        color: Theme.of(context).colorScheme.onPrimaryContainer,
+                        fontWeight: FontWeight.bold,  // Make text bolder
                       ),
                     ),
                     Text(
                       appState.rollTotal.toString(), 
-                      style: Theme.of(context).textTheme.displayMedium!.copyWith(
-                        color: Theme.of(context).colorScheme.onPrimary,
+                      style: Theme.of(context).textTheme.headlineMedium!.copyWith(
+                        color: Theme.of(context).colorScheme.onPrimaryContainer,
+                        fontWeight: FontWeight.bold,  // Make text bolder
                       ),
                     ),
                   ],
@@ -411,7 +427,7 @@ class BigCard extends StatelessWidget {
               ),
             ),
           ),
-        ], // Children
+        ],
       ),
     );
   }
@@ -474,52 +490,101 @@ class HistoryListView extends StatefulWidget {
   State<HistoryListView> createState() => _HistoryListViewState();
 }
 
-class _ToggleButtonsRollState extends State<ToggleButtonsRolls>{
-  bool vertical = false;
-  Map<String, dynamic> map = {
+class _ToggleButtonsRollState extends State<ToggleButtonsRolls> {
+  // Split the buttons into two maps for two rows
+  final Map<String, dynamic> topRowMap = {
     "No bonus": Icons.square,
     "Attack": Icons.api,
+  };
+  
+  final Map<String, dynamic> bottomRowMap = {
     "Fortitude": Icons.local_pharmacy,
     "Reflex": Icons.call_missed_outgoing,
     "Will": Icons.auto_fix_high_sharp
   };
+
   late List<bool> _selectedRolls;
-  var currentBonus = 0;
-  var totalRoll = 0;
-  var bonusType = '';
-  List<RollBonuses> bonuses = <RollBonuses>[];
 
   @override
   Widget build(BuildContext context) {
     final appState = context.watch<MyAppState>();
-    _selectedRolls = List.filled(map.length, false);
-    return Wrap(
-      children: [
-        ToggleButtons(
-          isSelected: _selectedRolls,        
-          selectedColor: Colors.blueGrey,
-          children: map.entries.map((ele) {
-            return Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(ele.value),
-                Text(ele.key),
-              ],
-            );
-          }).toList(),
-          onPressed: (value) async{            
-            await appState.refreshBonuses();
-            setState(() {
-              appState.handleBonusAndText(value);
-              _selectedRolls = List.filled(map.length, false);
-              _selectedRolls[value] = true;
-            });
-          },
-        ),
-      ],
+    _selectedRolls = List.filled(5, false);  // Total number of buttons
+    
+    return Padding(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(  // Changed from Wrap to Column
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          // Top row
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8.0),
+            child: ToggleButtons(
+              isSelected: _selectedRolls.sublist(0, 2),  // First two buttons
+              selectedColor: Theme.of(context).colorScheme.onPrimary,
+              color: Theme.of(context).colorScheme.onPrimaryContainer,
+              fillColor: Theme.of(context).colorScheme.primary,
+              borderColor: Theme.of(context).colorScheme.primary,
+              borderWidth: 2,
+              borderRadius: BorderRadius.circular(8),
+              constraints: BoxConstraints(minHeight: 80, minWidth: 100),
+              children: topRowMap.entries.map((ele) => _buildButtonContent(ele)).toList(),
+              onPressed: (value) async {
+                await appState.refreshBonuses();
+                setState(() {
+                  appState.handleBonusAndText(value);
+                  _selectedRolls = List.filled(5, false);
+                  _selectedRolls[value] = true;
+                });
+              },
+            ),
+          ),
+          // Bottom row
+          ToggleButtons(
+            isSelected: _selectedRolls.sublist(2, 5),  // Last three buttons
+            selectedColor: Theme.of(context).colorScheme.onPrimary,
+            color: Theme.of(context).colorScheme.onPrimaryContainer,
+            fillColor: Theme.of(context).colorScheme.primary,
+            borderColor: Theme.of(context).colorScheme.primary,
+            borderWidth: 2,
+            borderRadius: BorderRadius.circular(8),
+            constraints: BoxConstraints(minHeight: 80, minWidth: 100),
+            children: bottomRowMap.entries.map((ele) => _buildButtonContent(ele)).toList(),
+            onPressed: (value) async {
+              await appState.refreshBonuses();
+              setState(() {
+                appState.handleBonusAndText(value + 2);  // Offset by 2 for bottom row
+                _selectedRolls = List.filled(5, false);
+                _selectedRolls[value + 2] = true;
+              });
+            },
+          ),
+        ],
+      ),
     );
   }
 
+  Widget _buildButtonContent(MapEntry<String, dynamic> ele) {
+    return Padding(
+      padding: const EdgeInsets.all(8.0),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            ele.value,
+            size: 32,  // Larger icons
+          ),
+          SizedBox(height: 4),  // Space between icon and text
+          Text(
+            ele.key,
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _HistoryListViewState extends State<HistoryListView> {
