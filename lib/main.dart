@@ -92,10 +92,13 @@ class MyAppState extends ChangeNotifier {
   }
 
   Future<void> refreshBonuses() async {
-    // Only refresh if we haven't fetched recently
+    print('Starting refresh. Current bonuses: $_currentBonuses');
+    print('Last refresh: $_lastBonusRefresh');
+    
     if (_lastBonusRefresh != null && 
         DateTime.now().difference(_lastBonusRefresh!) < refreshInterval) {
-      return;  // Use cached bonuses
+      print('Using cached bonuses, skipping refresh');
+      return;
     }
 
     _isLoadingBonuses = true;
@@ -103,11 +106,19 @@ class MyAppState extends ChangeNotifier {
     notifyListeners();
 
     try {
+      const url = 'https://script.google.com/macros/s/AKfycbx--IxOTsnO25o5rz5zRfMyz0epkLlXZPCcSr3nHrGuqMFBruw5nikzLHpN-KpBGidR/exec';
+      print('Fetching bonuses from: $url');
+      
       final response = await http.get(
-        Uri.parse('https://script.google.com/macros/s/AKfycbzaSs3mrDRmOtfGcZEpDu4BAle8f6h8VBRfEoribPsDHqsCkM6zC2ntelhcdtmf21le-A/exec'),
+        Uri.parse(url),
         headers: {
           'Accept': 'application/json',
           'Content-Type': 'application/json',
+        },
+      ).timeout(
+        Duration(seconds: 10),
+        onTimeout: () {
+          throw TimeoutException('Connection timed out. Please check your internet connection.');
         },
       );
       
@@ -118,12 +129,13 @@ class MyAppState extends ChangeNotifier {
         final jsonBonuses = convert.jsonDecode(response.body);
         _currentBonuses = RollBonuses.fromJson(jsonBonuses);
         _lastBonusRefresh = DateTime.now();
+        print('Successfully updated bonuses: $_currentBonuses');
       } else {
-        _bonusError = 'Failed to load bonuses: ${response.statusCode}';
+        _bonusError = 'Server error: ${response.statusCode}';
       }
     } catch (e) {
-      print('Error details: $e');
-      _bonusError = 'Error loading bonuses: $e';
+      print('Error refreshing bonuses: $e');
+      _bonusError = 'Error: $e';
     } finally {
       _isLoadingBonuses = false;
       notifyListeners();
@@ -290,8 +302,18 @@ class _MyHomePageState extends State<MyHomePage> {
             icon: Icon(Icons.refresh),
             tooltip: 'Refresh Bonuses',
             onPressed: () async {
+              // Force clear all cached data
               appState._lastBonusRefresh = null;
+              appState._currentBonuses = null;
+              appState._bonusError = '';
+              appState._isLoadingBonuses = false;
+              
+              // Force refresh
               await appState.refreshBonuses();
+              
+              // Print debug info
+              print('Current bonuses after refresh: ${appState._currentBonuses}');
+              print('Last refresh time: ${appState._lastBonusRefresh}');
               
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(
@@ -609,7 +631,7 @@ class _HistoryListViewState extends State<HistoryListView> {
             child: Card(
               margin: EdgeInsets.symmetric(horizontal: 12, vertical: 4),
               child: ListTile(
-                leading: CircleAvatar(
+                leading: CircleAvatar( //TODO: make this a dice icon
                   child: Text(
                     rollHistory.roll.toString(),
                     style: TextStyle(fontWeight: FontWeight.bold),
