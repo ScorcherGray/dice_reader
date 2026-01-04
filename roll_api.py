@@ -1,8 +1,10 @@
 from flask import Flask, request, Response
+from flask_cors import CORS
 import queue
 import json
 
 api = Flask(__name__)
+CORS(api)  # Enable CORS for all routes
 rolls = 0
 MAX_SIZE = 5
 
@@ -59,8 +61,10 @@ def listen():
     response = Response(stream(), mimetype='text/event-stream')
     response.headers['Cache-Control'] = 'no-cache'
     response.headers['Connection'] = 'keep-alive'
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Headers'] = 'Cache-Control'
     return response
 
 if __name__ == '__main__':
     announcer = RollAnnouncer()
-    api.run(host='0.0.0.0')
+    api.run(host='0.0.0.0', port=5000, debug=True)

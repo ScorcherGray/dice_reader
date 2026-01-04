@@ -291,7 +291,6 @@ class ToggleButtonsRolls extends StatefulWidget {
 class _MyHomePageState extends State<MyHomePage> {
   @override
   Widget build(BuildContext context) {
-    var colorScheme = Theme.of(context).colorScheme;
     var appState = context.watch<MyAppState>();
 
     return Scaffold(
