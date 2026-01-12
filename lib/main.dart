@@ -130,6 +130,9 @@ class MyAppState extends ChangeNotifier {
         _currentBonuses = RollBonuses.fromJson(jsonBonuses);
         _lastBonusRefresh = DateTime.now();
         print('Successfully updated bonuses: $_currentBonuses');
+      } else if (response.statusCode == 403) {
+        _bonusError = 'Access denied: Google Script not publicly accessible. Check script deployment settings.';
+        print('403 Error: Google Apps Script access denied. Ensure the script is deployed with "Anyone" access.');
       } else {
         _bonusError = 'Server error: ${response.statusCode}';
       }
@@ -314,6 +317,8 @@ class _MyHomePageState extends State<MyHomePage> {
               print('Current bonuses after refresh: ${appState._currentBonuses}');
               print('Last refresh time: ${appState._lastBonusRefresh}');
               
+              if (!mounted) return;
+
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(
                   content: Text(
