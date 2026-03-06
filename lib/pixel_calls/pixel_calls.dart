@@ -38,19 +38,25 @@ class Sse {
     String buffer = '';
     
     _response.stream.transform(utf8.decoder).listen(
-      (String data) {
-        buffer += data;
-        if (buffer.contains('\n\n')) {
-          var parts = buffer.split('\n\n');
-          for (var i = 0; i < parts.length - 1; i++) {
-            var part = parts[i].trim();
-            if (part.startsWith('data: ')) {
-              var eventData = part.substring(6);
-              if (eventData.contains('"heartbeat":true')) continue;
-              _streamController.add(eventData);
+        (String data) {
+          print('SSE raw chunk...\n $data \n END OF CHUNK');
+          buffer += data.replaceAll('\r\n', '\n');
+          if (buffer.contains('\n\n')) {
+            final parts = buffer.split('\n\n');
+            for (var i = 0; i < parts.length - 1; i++) {
+              final block = parts[i];
+              for (final rawLine in block.split('\n')) {
+                final line = rawLine.trim();
+                if (line.isEmpty) continue;
+                if (line.startsWith('data:')) {
+                  final eventData = line.substring(6);
+                  if (eventData.contains('"heartbeat":true')) continue;
+                  print('Adding SSE event: $eventData');
+                  _streamController.add(eventData);
+                }
+              }
             }
-          }
-          buffer = parts.last;
+            buffer = parts.last;
         }
       },
       onError: (error) {

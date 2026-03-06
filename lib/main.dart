@@ -74,6 +74,11 @@ class MyAppState extends ChangeNotifier {
   bool _isLoadingBonuses = false;
   String _bonusError = '';
 
+  // Local health state (derived from sheet max values on first load)
+  int currentHp = 0;
+  int currentTempHp = 0;
+  bool _healthInitialized = false;
+
   DateTime? _lastBonusRefresh;
   static const Duration refreshInterval = Duration(minutes: 2);  // Adjust as needed
 
@@ -82,6 +87,11 @@ class MyAppState extends ChangeNotifier {
   MyAppState() {
     connectToSse();
     refreshBonuses();  // Prefetch bonuses immediately
+  }
+
+  void removeFromHistory(RollHistory rollHistory) {
+    history.remove(rollHistory);
+    notifyListeners();
   }
 
   void updateBonus(var bonus, String newText) {
@@ -106,7 +116,7 @@ class MyAppState extends ChangeNotifier {
     notifyListeners();
 
     try {
-      const url = 'https://script.google.com/macros/s/AKfycbx--IxOTsnO25o5rz5zRfMyz0epkLlXZPCcSr3nHrGuqMFBruw5nikzLHpN-KpBGidR/exec';
+      const url = 'https://script.google.com/macros/s/AKfycbyNawZh2ZHKJqdJH0YwzlbvPSXU17AHyVEbPam0GLY7uo47foP8bogbcTDl637PaMCC/exec';
       print('Fetching bonuses from: $url');
       
       final response = await http.get(
@@ -126,10 +136,22 @@ class MyAppState extends ChangeNotifier {
       print('Response body: ${response.body}');
       
       if (response.statusCode == 200) {
-        final jsonBonuses = convert.jsonDecode(response.body);
-        _currentBonuses = RollBonuses.fromJson(jsonBonuses);
-        _lastBonusRefresh = DateTime.now();
-        print('Successfully updated bonuses: $_currentBonuses');
+        final body = response.body.trim();
+        if (body.isEmpty || (!body.startsWith('{') && !body.startsWith('['))) {
+          _bonusError = 'Google Script returned an error page instead of data. Check your script (e.g. getSheetByName).';
+          print('Response is not JSON (starts with: ${body.length > 50 ? body.substring(0, 50) : body})');
+        } else {
+          try {
+            final jsonBonuses = convert.jsonDecode(response.body) as Map<String, dynamic>;
+            _currentBonuses = RollBonuses.fromJson(jsonBonuses);
+            _syncHealthFromBonuses();
+            _lastBonusRefresh = DateTime.now();
+            print('Successfully updated bonuses: $_currentBonuses');
+          } on FormatException catch (e) {
+            _bonusError = 'Google Script returned invalid data. Check your script.';
+            print('JSON parse error: $e');
+          }
+        }
       } else if (response.statusCode == 403) {
         _bonusError = 'Access denied: Google Script not publicly accessible. Check script deployment settings.';
         print('403 Error: Google Apps Script access denied. Ensure the script is deployed with "Anyone" access.');
@@ -143,6 +165,71 @@ class MyAppState extends ChangeNotifier {
       _isLoadingBonuses = false;
       notifyListeners();
     }
+  }
+
+  int get maxHp => _currentBonuses?.maxHp ?? 0;
+  int get maxTempHp => _currentBonuses?.maxTempHp ?? 0;
+
+  void _syncHealthFromBonuses() {
+    final maxHpLocal = maxHp;
+    final maxTempLocal = maxTempHp;
+
+    if (!_healthInitialized) {
+      currentHp = maxHpLocal;
+      currentTempHp = maxTempLocal;
+      _healthInitialized = true;
+      return;
+    }
+
+    // If max values change, clamp current values so they remain valid.
+    if (maxHpLocal > 0) {
+      currentHp = currentHp.clamp(0, maxHpLocal);
+    }
+    if (maxTempLocal > 0) {
+      currentTempHp = currentTempHp.clamp(0, maxTempLocal);
+    }
+  }
+
+  void applyHpChange(int delta) {
+    if (maxHp <= 0) return;
+    if (delta == 0) return;
+
+    currentHp = (currentHp + delta).clamp(0, maxHp);
+    notifyListeners();
+  }
+
+  void applyTempHpChange(int delta) {
+    if (maxTempHp <= 0) return;
+    if (delta == 0) return;
+
+    currentTempHp = (currentTempHp + delta).clamp(0, maxTempHp);
+    notifyListeners();
+  }
+
+  void applyHealthChange(int delta) {
+    if (maxHp <= 0 && maxTempHp <= 0) return; // Why prevent adjustments when maxHp and maxTempHp are 0?
+    if (delta == 0) return;
+
+    if (delta > 0) {
+      final healed = delta;
+      currentHp = (currentHp + healed).clamp(0, maxHp);
+      notifyListeners();
+      return;
+    }
+
+    var dmg = -delta; // flip negative delta into positive damage amount
+
+    // Temp HP first
+    final tempUsed = dmg.clamp(0, currentTempHp); // What happens when currentTempHp is 0?
+    currentTempHp -= tempUsed;
+    dmg -= tempUsed;
+
+    // Remaining to HP
+    if (dmg > 0) {
+      currentHp = (currentHp - dmg).clamp(0, maxHp);
+    }
+
+    notifyListeners();
   }
 
   void handleBonusAndText(int value) async {
@@ -172,19 +259,22 @@ class MyAppState extends ChangeNotifier {
       case 1:
         updateBonus(bonuses.attackBonus, 'Attack Roll: ');
       case 2:
-        updateBonus(bonuses.fortBonus, 'Fortitude Save: ');
+        updateBonus(bonuses.casterLevel, 'Caster Level: ');
       case 3:
-        updateBonus(bonuses.reflexBonus, 'Reflex Save: ');
+        updateBonus(bonuses.fortBonus, 'Fortitude Save: ');
       case 4:
+        updateBonus(bonuses.reflexBonus, 'Reflex Save: ');
+      case 5:
         updateBonus(bonuses.willBonus, 'Will Save: ');
     }
   }
 
   void connectToSse() async {
     connectionStatus = 'Connecting...';
+    print("Connecting to SSE....");
     notifyListeners();
     
-    final sseUri = Uri.parse('http://192.168.1.107:5000/listen');
+    final sseUri = Uri.parse('http://10.211.117.249:8080/listen');
     try {
       if (_sseStreamSubscription != null) {
         await _sseStreamSubscription!.cancel();
@@ -193,6 +283,7 @@ class MyAppState extends ChangeNotifier {
       _sse = await Sse.connect(uri: sseUri);
       isConnected = true;
       connectionStatus = 'Connected';
+      print('!!!!Connected to SSE!!!!');
       notifyListeners();
       _retryCount = 0;
       
@@ -300,6 +391,17 @@ class _MyHomePageState extends State<MyHomePage> {
       appBar: AppBar(
         title: Text('Roll Bonuses'),
         actions: [
+          IconButton(
+            icon: Icon(Icons.psychology),
+            tooltip: 'Ability Scores',
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute<void>(
+                  builder: (context) => AbilityScoresPage(),
+                ),
+              );
+            },
+          ),
           IconButton(
             icon: Icon(Icons.refresh),
             tooltip: 'Refresh Bonuses',
@@ -478,8 +580,7 @@ class FavoritesPage extends StatelessWidget {
                     icon: Icon(Icons.delete_outline, semanticLabel: 'Delete'),
                     color: theme.colorScheme.primary,
                     onPressed: () {
-                      appState.history.remove(rollHistory);
-                      appState.notifyListeners();
+                      appState.removeFromHistory(rollHistory);
                     },
                   ),
                   title: Text(
@@ -495,6 +596,279 @@ class FavoritesPage extends StatelessWidget {
   }
 }
 
+/// D&D ability scores screen: STR, CON, DEX, INT, WIS, CHA (score + modifier each).
+class AbilityScoresPage extends StatefulWidget {
+  static const List<Map<String, dynamic>> _stats = [
+    {'label': 'STR', 'name': 'Strength'},
+    {'label': 'CON', 'name': 'Constitution'},
+    {'label': 'DEX', 'name': 'Dexterity'},
+    {'label': 'INT', 'name': 'Intelligence'},
+    {'label': 'WIS', 'name': 'Wisdom'},
+    {'label': 'CHA', 'name': 'Charisma'},
+  ];
+
+  @override
+  State<AbilityScoresPage> createState() => _AbilityScoresPageState();
+}
+
+enum HealthTarget { auto, hp, tempHp}
+
+class _AbilityScoresPageState extends State<AbilityScoresPage> {
+  final TextEditingController _hpDeltaController = TextEditingController();
+  HealthTarget _target = HealthTarget.auto;
+
+  @override
+  void dispose() {
+    _hpDeltaController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    var appState = context.watch<MyAppState>();
+    var theme = Theme.of(context);
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text('Ability Scores'),
+        leading: IconButton(
+          icon: Icon(Icons.arrow_back),
+          onPressed: () => Navigator.of(context).pop(),
+        ),
+        actions: [
+          IconButton(
+            icon: Icon(Icons.refresh),
+            tooltip: 'Refresh from sheet',
+            onPressed: () async {
+              appState._lastBonusRefresh = null;
+              await appState.refreshBonuses();
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(appState._bonusError.isEmpty
+                        ? 'Ability scores refreshed'
+                        : 'Error: ${appState._bonusError}'),
+                    duration: Duration(seconds: 2),
+                    behavior: SnackBarBehavior.floating,
+                  ),
+                );
+              }
+            },
+          ),
+        ],
+      ),
+      body: appState._isLoadingBonuses && appState._currentBonuses == null
+          ? Center(child: CircularProgressIndicator())
+          : appState._bonusError.isNotEmpty && appState._currentBonuses == null
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24.0),
+                    child: Text(
+                      appState._bonusError,
+                      style: TextStyle(color: theme.colorScheme.error),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                )
+              : ListView(
+                  padding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  children: [
+                    _buildHpCard(context, appState),
+                    SizedBox(height: 8),
+                    ...AbilityScoresPage._stats.asMap().entries.map((entry) {
+                      final i = entry.key;
+                      final info = entry.value;
+                      final score = _getScore(appState._currentBonuses, i);
+                      final mod = _getMod(appState._currentBonuses, i);
+                      return Card(
+                        margin: EdgeInsets.only(bottom: 8),
+                        child: ListTile(
+                          title: Text(
+                            '${info['label']} — ${info['name']}',
+                            style: theme.textTheme.titleMedium?.copyWith(
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          subtitle: Text('Score: $score  •  Modifier: ${_formatMod(mod)}'),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              _statChip(context, 'Score', score.toString()),
+                              SizedBox(width: 8),
+                              _statChip(context, 'Mod', _formatMod(mod)),
+                            ],
+                          ),
+                        ),
+                      );
+                    }),
+                  ],
+                ),
+    );
+  }
+
+  Widget _buildHpCard(BuildContext context, MyAppState appState) {
+    final theme = Theme.of(context);
+    final maxHp = appState.maxHp;
+    final maxTempHp = appState.maxTempHp;
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Health',
+              style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+            ),
+            SizedBox(height: 8),
+            Wrap(
+              spacing: 12,
+              runSpacing: 8,
+              children: [
+                _statChip(context, 'HP', '${appState.currentHp} / $maxHp'),
+                _statChip(context, 'Temp HP', '${appState.currentTempHp} / $maxTempHp'),
+              ],
+            ),
+            SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              children: [
+                ChoiceChip(
+                  label: Text('Auto'),
+                  selected: _target == HealthTarget.auto,
+                  onSelected: (_) => setState(() => _target = HealthTarget.auto),
+                ),
+                ChoiceChip(
+                  label: Text('HP'),
+                  selected: _target == HealthTarget.hp,
+                  onSelected: (_) => setState(() => _target = HealthTarget.hp),
+                ),
+                ChoiceChip(
+                  label: Text('Temp HP'),
+                  selected: _target == HealthTarget.tempHp,
+                  onSelected: (_) => setState(() => _target = HealthTarget.tempHp),
+                ),
+              ],
+            ),
+            SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _hpDeltaController,
+                    keyboardType: TextInputType.number,
+                    decoration: InputDecoration(
+                      labelText: 'Damage / Heal',
+                      hintText: '-8 for damage, 5 for healing',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    )
+                  ),
+                ),
+                SizedBox(width: 12),
+                FilledButton(
+                  onPressed: () {
+                    final raw = _hpDeltaController.text.trim();
+                    final delta = int.tryParse(raw);
+                    if (delta == null) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('Enter a whole number like -8 or 5'),
+                          duration: Duration(seconds: 2),
+                          behavior: SnackBarBehavior.floating,
+                        ),
+                      );
+                      return;
+                    }
+
+                    switch (_target) {
+                      case HealthTarget.auto:
+                        appState.applyHealthChange(delta);
+                      case HealthTarget.hp:
+                        appState.applyHpChange(delta);
+                      case HealthTarget.tempHp:
+                        appState.applyTempHpChange(delta);
+                    }
+
+                    _hpDeltaController.clear();
+                  },
+                  child: Text('Apply'),
+                ),
+              ],
+            ),
+            SizedBox(height: 6),
+            Text(
+              _target == HealthTarget.auto
+                ? 'Auto: damage hits Temp HP then HP. Healing affects HP only.'
+                : _target == HealthTarget.hp
+                  ? 'HP: damage and healing affect HP only.'
+                  : 'Temp HP: damage and healing affect Temp HP only.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  int _getScore(RollBonuses? b, int index) {
+    if (b == null) return 0;
+    switch (index) {
+      case 0: return b.strScore;
+      case 1: return b.conScore;
+      case 2: return b.dexScore;
+      case 3: return b.intScore;
+      case 4: return b.wisScore;
+      case 5: return b.chaScore;
+      default: return 0;
+    }
+  }
+
+  int _getMod(RollBonuses? b, int index) {
+    if (b == null) return 0;
+    switch (index) {
+      case 0: return b.strMod;
+      case 1: return b.conMod;
+      case 2: return b.dexMod;
+      case 3: return b.intMod;
+      case 4: return b.wisMod;
+      case 5: return b.chaMod;
+      default: return 0;
+    }
+  }
+  
+
+  String _formatMod(int mod) => mod >= 0 ? '+$mod' : '$mod';
+
+  Widget _statChip(BuildContext context, String label, String value) {
+    return Container(
+      padding: EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.primaryContainer,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            label,
+            style: Theme.of(context).textTheme.labelSmall,
+          ),
+          Text(
+            value,
+            style: Theme.of(context).textTheme.titleMedium?.copyWith(
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class HistoryListView extends StatefulWidget {
   const HistoryListView({Key? key}) : super(key: key);
 
@@ -503,16 +877,17 @@ class HistoryListView extends StatefulWidget {
 }
 
 class _ToggleButtonsRollState extends State<ToggleButtonsRolls> {
-  // Split the buttons into two maps for two rows
+  // Two rows of 3 buttons each
   final Map<String, dynamic> topRowMap = {
     "No bonus": Icons.square,
     "Attack": Icons.api,
+    "Caster Lvl": Icons.auto_awesome,
   };
-  
+
   final Map<String, dynamic> bottomRowMap = {
     "Fortitude": Icons.local_pharmacy,
     "Reflex": Icons.call_missed_outgoing,
-    "Will": Icons.auto_fix_high_sharp
+    "Will": Icons.auto_fix_high_sharp,
   };
 
   late List<bool> _selectedRolls;
@@ -520,18 +895,18 @@ class _ToggleButtonsRollState extends State<ToggleButtonsRolls> {
   @override
   Widget build(BuildContext context) {
     final appState = context.watch<MyAppState>();
-    _selectedRolls = List.filled(5, false);  // Total number of buttons
+    _selectedRolls = List.filled(6, false);  // Total number of buttons
     
     return Padding(
       padding: const EdgeInsets.all(16.0),
       child: Column(  // Changed from Wrap to Column
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          // Top row
+          // Top row (No bonus, Attack, Caster Lvl)
           Padding(
             padding: const EdgeInsets.only(bottom: 8.0),
             child: ToggleButtons(
-              isSelected: _selectedRolls.sublist(0, 2),  // First two buttons
+              isSelected: _selectedRolls.sublist(0, 3),
               selectedColor: Theme.of(context).colorScheme.onPrimary,
               color: Theme.of(context).colorScheme.onPrimaryContainer,
               fillColor: Theme.of(context).colorScheme.primary,
@@ -544,15 +919,15 @@ class _ToggleButtonsRollState extends State<ToggleButtonsRolls> {
                 await appState.refreshBonuses();
                 setState(() {
                   appState.handleBonusAndText(value);
-                  _selectedRolls = List.filled(5, false);
+                  _selectedRolls = List.filled(6, false);
                   _selectedRolls[value] = true;
                 });
               },
             ),
           ),
-          // Bottom row
+          // Bottom row (Fortitude, Reflex, Will)
           ToggleButtons(
-            isSelected: _selectedRolls.sublist(2, 5),  // Last three buttons
+            isSelected: _selectedRolls.sublist(3, 6),
             selectedColor: Theme.of(context).colorScheme.onPrimary,
             color: Theme.of(context).colorScheme.onPrimaryContainer,
             fillColor: Theme.of(context).colorScheme.primary,
@@ -564,9 +939,9 @@ class _ToggleButtonsRollState extends State<ToggleButtonsRolls> {
             onPressed: (value) async {
               await appState.refreshBonuses();
               setState(() {
-                appState.handleBonusAndText(value + 2);  // Offset by 2 for bottom row
-                _selectedRolls = List.filled(5, false);
-                _selectedRolls[value + 2] = true;
+                appState.handleBonusAndText(value + 3);  // Offset by 3 for bottom row
+                _selectedRolls = List.filled(6, false);
+                _selectedRolls[value + 3] = true;
               });
             },
           ),
