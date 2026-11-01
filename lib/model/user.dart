@@ -8,6 +8,8 @@ class RollBonuses {
   // D&D ability scores: score and modifier for each
   final int maxHp;
   final int maxTempHp;
+  final int currentTemp;
+  final int currentHp;
   final int strScore;
   final int strMod;
   final int conScore;
@@ -29,6 +31,8 @@ class RollBonuses {
     this.casterLevel = 0,
     this.maxHp = 0,
     this.maxTempHp = 0,
+    this.currentTemp = 0,
+    this.currentHp = 0,
     this.strScore = 0,
     this.strMod = 0,
     this.conScore = 0,
@@ -75,6 +79,8 @@ class RollBonuses {
       casterLevel: parseIntField(json['casterLevel'], 'casterLevel'),
       maxHp: parseFirstOfKeys(['maxHp', 'hpMax', 'hp'], 'maxHp'),
       maxTempHp: parseFirstOfKeys(['maxTempHp', 'tempHpMax', 'tempHp'], 'maxTempHp'),
+      currentTemp: parseIntField(json['currentTemp'], 'currentTemp'),
+      currentHp: parseIntField(json['currentHp'], 'currentHp'),
       strScore: parseIntField(json['strScore'], 'strScore'),
       strMod: parseIntField(json['strMod'], 'strMod'),
       conScore: parseIntField(json['conScore'], 'conScore'),

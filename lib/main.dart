@@ -1,15 +1,21 @@
 // ignore_for_file: prefer_const_constructors, prefer_const_literals_to_create_immutables
 import 'dart:async';
+import 'dart:io' show Platform, SocketException;
 
 import 'package:http/http.dart' as http;
 import 'package:dice_reader/model/user.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:provider/provider.dart';
-import 'package:dice_reader/pixel_calls/pixel_calls.dart';
+import 'package:dice_reader/pixel_calls/ble_dice_service.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:universal_ble/universal_ble.dart';
 import 'dart:convert' as convert;
 
 Future main() async{
   WidgetsFlutterBinding.ensureInitialized();
+  await dotenv.load(fileName: '.env');
 
   runApp(MyApp());
 }
@@ -43,9 +49,9 @@ class MyApp extends StatelessWidget {
         theme: ThemeData(
           useMaterial3: true,
           colorScheme: ColorScheme.fromSeed(
-            seedColor: Colors.green,
+            seedColor: Color.fromARGB(255, 255, 1, 1),
             brightness: Brightness.dark,  // Dark theme
-            primary: Colors.green[700],   // Darker green
+            primary: Color.fromARGB(255, 114, 9, 9),   // Darker red
           ),
         ),
         home: MyHomePage(),
@@ -58,8 +64,10 @@ class MyAppState extends ChangeNotifier {
   var history = <RollHistory>[];  // Initialize as empty RollHistory list
   var rollTotal = 0;
   var rollBonus = 0;
-  Sse? _sse;
-  StreamSubscription<String>? _sseStreamSubscription;
+  final BleDiceService _bleDiceService = BleDiceService();
+  StreamSubscription<int>? _bleRollSubscription;
+  StreamSubscription<String>? _bleStatusSubscription;
+  bool _didRetryAfterLocationGrant = false;
   String buttonText = 'No roll selected: ';
 
   GlobalKey? historyListKey;
@@ -83,9 +91,22 @@ class MyAppState extends ChangeNotifier {
   static const Duration refreshInterval = Duration(minutes: 2);  // Adjust as needed
 
   static const int maxHistoryLength = 12;
+  String get _sheetBaseUrl => _env('SHEET_BASE_URL');
+  static const String _characterName = 'Stats and Skills D';
+  static const String _currentTempHpCell = 'L7';
+  static const String _currentHpCell = 'M7';
+  static const String _currentTempHpField = 'currentTemp';
+  static const String _currentHpField = 'currentHp';
+
+  String get _discordWebhookUrl => _env('DISCORD_WEBHOOK_URL');
+  String get _discordThumbnailUrl => _env('DISCORD_THUMBNAIL_URL');
+  String get _discordEmbedDescription => _env('DISCORD_EMBED_DESCRIPTION');
+
+  String _env(String key) =>
+      dotenv.isInitialized ? (dotenv.env[key] ?? '').trim() : '';
 
   MyAppState() {
-    connectToSse();
+    connectToBleDice();
     refreshBonuses();  // Prefetch bonuses immediately
   }
 
@@ -116,11 +137,12 @@ class MyAppState extends ChangeNotifier {
     notifyListeners();
 
     try {
-      const url = 'https://script.google.com/macros/s/AKfycbyNawZh2ZHKJqdJH0YwzlbvPSXU17AHyVEbPam0GLY7uo47foP8bogbcTDl637PaMCC/exec';
-      print('Fetching bonuses from: $url');
-      
+      var url = Uri.parse(_sheetBaseUrl).replace(queryParameters: {
+        'char': _characterName,
+      });
+      print('\nRefresh Request URL: $url');
       final response = await http.get(
-        Uri.parse(url),
+        url,
         headers: {
           'Accept': 'application/json',
           'Content-Type': 'application/json',
@@ -169,14 +191,16 @@ class MyAppState extends ChangeNotifier {
 
   int get maxHp => _currentBonuses?.maxHp ?? 0;
   int get maxTempHp => _currentBonuses?.maxTempHp ?? 0;
+  int get currentTemp => _currentBonuses?.currentTemp ?? 0;
+  int get currentHealth => _currentBonuses?.currentHp ?? 0;
 
   void _syncHealthFromBonuses() {
     final maxHpLocal = maxHp;
     final maxTempLocal = maxTempHp;
 
     if (!_healthInitialized) {
-      currentHp = maxHpLocal;
-      currentTempHp = maxTempLocal;
+      currentHp = currentHealth;
+      currentTempHp = currentTemp;
       _healthInitialized = true;
       return;
     }
@@ -269,56 +293,209 @@ class MyAppState extends ChangeNotifier {
     }
   }
 
-  void connectToSse() async {
+  void connectToBleDice() async {
     connectionStatus = 'Connecting...';
-    print("Connecting to SSE....");
+    print('Connecting to BLE dice...');
     notifyListeners();
-    
-    final sseUri = Uri.parse('http://10.211.117.249:8080/listen');
+
     try {
-      if (_sseStreamSubscription != null) {
-        await _sseStreamSubscription!.cancel();
+      final permissionsOk = await _ensureBlePermissions();
+      if (!permissionsOk) {
+        connectionStatus =
+            'Bluetooth permission denied (grant Nearby Devices access)';
+        isConnected = false;
+        notifyListeners();
+        return;
       }
-      
-      _sse = await Sse.connect(uri: sseUri);
+
+      await _bleRollSubscription?.cancel();
+      await _bleStatusSubscription?.cancel();
+
+      _bleStatusSubscription = _bleDiceService.statusStream.listen((status) {
+        connectionStatus = status;
+        isConnected = status.toLowerCase().contains('connected');
+        notifyListeners();
+      });
+
+      await _bleDiceService.connect();
+      _didRetryAfterLocationGrant = false;
+      _retryCount = 0;
       isConnected = true;
       connectionStatus = 'Connected';
-      print('!!!!Connected to SSE!!!!');
       notifyListeners();
-      _retryCount = 0;
-      
-      _sseStreamSubscription = _sse!.stream.listen(
-        (String eventData) {
-          try {
-            print('Received event data: $eventData');
-            Map<String, dynamic> eventDataMap = convert.jsonDecode(eventData);
-            int roll = eventDataMap['roll'] ?? -1;
-            print('Parsed roll: $roll, current bonus: $rollBonus');
-            if (roll != -1) {
-              rollTotal = roll + rollBonus;
-              addToHistory(roll);  // Add to history when roll is received
-              print('New total: $rollTotal');
-              notifyListeners();
-            }
-          } catch (e) {
-            print('Error parsing event data: $e');
-          }
+
+      _bleRollSubscription = _bleDiceService.rollStream.listen(
+        (roll) {
+          if (roll <= 0) return;
+          print('Received BLE roll: $roll, current bonus: $rollBonus');
+          rollTotal = roll + rollBonus;
+          addToHistory(roll);
+          _postDiscordRollWebhook(roll);
+          print('New total: $rollTotal');
+          notifyListeners();
         },
         onError: (error) {
-          print('SSE error: $error');
+          print('BLE roll stream error: $error');
           _handleReconnect();
         },
         onDone: () {
-          print('SSE connection closed');
+          print('BLE roll stream closed');
           _handleReconnect();
         },
       );
     } catch (e) {
-      print('Connection error: $e');
-      connectionStatus = 'Connection failed';
+      if (!_didRetryAfterLocationGrant &&
+          e.toString().toLowerCase().contains('location permission missing')) {
+        final granted = await Permission.locationWhenInUse.request();
+        if (granted.isGranted) {
+          _didRetryAfterLocationGrant = true;
+          return connectToBleDice();
+        }
+      }
+      print('BLE connection error: $e');
+      connectionStatus = _friendlyBleErrorMessage(e);
       isConnected = false;
       notifyListeners();
       _handleReconnect();
+    }
+  }
+
+  Future<bool> _ensureBlePermissions() async {
+    if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
+      final scanStatus = await Permission.bluetoothScan.request();
+      final connectStatus = await Permission.bluetoothConnect.request();
+
+      if (scanStatus.isPermanentlyDenied ||
+          connectStatus.isPermanentlyDenied) {
+        connectionStatus =
+            'Bluetooth permission permanently denied in Settings';
+        notifyListeners();
+        return false;
+      }
+
+      return scanStatus.isGranted && connectStatus.isGranted;
+    }
+
+    try {
+      await UniversalBle.requestPermissions(withAndroidFineLocation: false);
+      return true;
+    } catch (e) {
+      connectionStatus = 'Bluetooth permission denied';
+      notifyListeners();
+      return false;
+    }
+  }
+
+  void retryBleConnection() {
+    _retryCount = 0;
+    connectToBleDice();
+  }
+
+  String _friendlyBleErrorMessage(Object error) {
+    final lower = error.toString().toLowerCase();
+    if (lower.contains('location permission missing')) {
+      return 'BLE scan requires location permission/services on this device';
+    }
+    if (lower.contains('no compatible pixels die found nearby')) {
+      return 'No dice found. Turn it on and disconnect from other apps/devices';
+    }
+    if (lower.contains('bluetooth') && lower.contains('off')) {
+      return 'Bluetooth appears to be off';
+    }
+    return 'Connection failed';
+  }
+
+  Future<String?> persistCurrentHealthToSheet() async {
+    try {
+      await _postSheetUpdate(
+        field: _currentTempHpField,
+        cell: _currentTempHpCell,
+        value: currentTempHp,
+      );
+      await _postSheetUpdate(
+        field: _currentHpField,
+        cell: _currentHpCell,
+        value: currentHp,
+      );
+      return null;
+    } catch (e) {
+      return '$e';
+    }
+  }
+
+  Future<void> _postSheetUpdate({
+    required String field,
+    required String cell,
+    required int value,
+  }) async {
+    final body = convert.jsonEncode({
+      'char': _characterName,
+      'field': field,
+      'cell': cell,
+      'value': value,
+    });
+
+    Future<http.Response> sendPost(Uri uri) {
+      print('\nSending POST to: $uri');
+      print('\nBody: $body');
+      return http
+          .post(
+            uri,
+            headers: {
+              'Accept': 'application/json',
+              'Content-Type': 'application/json',
+            },
+            body: body,
+          )
+          .timeout(
+            Duration(seconds: 10),
+            onTimeout: () {
+              throw TimeoutException('Timed out writing $cell to sheet.');
+            },
+          );
+    }
+
+    var response = await sendPost(Uri.parse(_sheetBaseUrl));
+
+    if (response.statusCode == 302 || response.statusCode == 301) {
+      final location = response.headers['location'];
+      if (location == null || location.isEmpty) {
+        throw Exception(
+          'Sheet update redirect ($cell): HTTP ${response.statusCode} '
+          'with no location header.',
+        );
+      }
+
+      final redirectedUri = Uri.parse(_sheetBaseUrl).resolve(location);
+      print('Following Apps Script redirect with GET: $redirectedUri');
+      response = await http
+          .get(
+            redirectedUri,
+            headers: {
+              'Accept': 'application/json',
+            },
+          )
+          .timeout(
+            Duration(seconds: 10),
+            onTimeout: () {
+              throw TimeoutException(
+                'Timed out reading redirect response for $cell.',
+              );
+            },
+          );
+    }
+
+    if (response.statusCode != 200) {
+      print('Sheet update failed ($cell): HTTP ${response.statusCode}. Body: ${response.body}');
+      throw Exception(
+        'Sheet update failed ($cell): HTTP ${response.statusCode}. '
+      );
+    }
+
+    final decoded = convert.jsonDecode(response.body);
+    if (decoded is! Map<String, dynamic> || decoded['result'] != 'success') {
+      print('Sheet update failed ($cell): HTTP ${response.statusCode}. Body: ${response.body}');
+      throw Exception('Sheet update failed ($cell): ${response.body}');
     }
   }
 
@@ -332,7 +509,7 @@ class MyAppState extends ChangeNotifier {
         Duration(seconds: delaySeconds),
         () {
           _retryCount++;
-          connectToSse();
+          connectToBleDice();
         },
       );
     } else {
@@ -343,8 +520,9 @@ class MyAppState extends ChangeNotifier {
 
   @override
   void dispose() {
-    _sseStreamSubscription?.cancel();
-    _sse?.close();
+    _bleRollSubscription?.cancel();
+    _bleStatusSubscription?.cancel();
+    _bleDiceService.dispose();
     super.dispose();
   }
 
@@ -367,6 +545,72 @@ class MyAppState extends ChangeNotifier {
     }
     notifyListeners();
   }
+
+  String _discordRollTitle(int rollTotal) {
+    final rollType = buttonText.replaceAll(':', '').trim();
+    final lower = rollType.toLowerCase();
+    final includeType = rollType.isNotEmpty &&
+        lower != 'no bonus' &&
+        lower != 'no roll selected' &&
+        lower != 'loading...';
+
+    if (!includeType) {
+      return 'Daerid rolled a $rollTotal';
+    }
+    return 'Daerid rolled a $rollTotal $rollType';
+  }
+
+  Future<void> _postDiscordRollWebhook(int roll) async {
+    if (_discordWebhookUrl.isEmpty) {
+      print('Discord webhook skipped: DISCORD_WEBHOOK_URL is not set');
+      return;
+    }
+
+    final embed = <String, dynamic>{
+      'title': _discordRollTitle(rollTotal),
+      'description': _discordEmbedDescription,
+    };
+
+    if (_discordThumbnailUrl.isNotEmpty) {
+      embed['thumbnail'] = {'url': _discordThumbnailUrl};
+    }
+
+    final body = convert.jsonEncode({'embeds': [embed]});
+    final headers = {
+      'Content-Type': 'application/json',
+      'User-Agent': 'dice_reader (Flutter; webhook)',
+    };
+
+    var uri = Uri.parse(_discordWebhookUrl).replace(
+      queryParameters: {'wait': 'true'},
+    );
+    Object? lastError;
+
+    for (var attempt = 1; attempt <= 3; attempt++) {
+      try {
+        final response = await http.post(uri, headers: headers, body: body);
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          print(
+            'Discord webhook failed: ${response.statusCode} ${response.body}',
+          );
+        }
+        return;
+      } on SocketException catch (e) {
+        lastError = e;
+      } on http.ClientException catch (e) {
+        lastError = e;
+      }
+
+      if (attempt == 2 && uri.host == 'discord.com') {
+        uri = uri.replace(host: 'discordapp.com');
+        print('Retrying Discord webhook via ${uri.host}');
+      } else if (attempt < 3) {
+        await Future<void>.delayed(Duration(milliseconds: 400 * attempt));
+      }
+    }
+
+    print('Discord webhook error after retries: $lastError');
+  }
 }
 
 class MyHomePage extends StatefulWidget {
@@ -383,6 +627,35 @@ class ToggleButtonsRolls extends StatefulWidget {
 }
 
 class _MyHomePageState extends State<MyHomePage> {
+  late final PageController _pageController;
+
+  @override
+  void initState() {
+    super.initState();
+    _pageController = PageController();
+  }
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return PageView(
+      controller: _pageController,
+      children: [
+        RollBonusesPage(),
+        AbilityScoresPage(),
+      ],
+    );
+  }
+}
+
+class RollBonusesPage extends StatelessWidget {
+  const RollBonusesPage({super.key});
+
   @override
   Widget build(BuildContext context) {
     var appState = context.watch<MyAppState>();
@@ -392,18 +665,7 @@ class _MyHomePageState extends State<MyHomePage> {
         title: Text('Roll Bonuses'),
         actions: [
           IconButton(
-            icon: Icon(Icons.psychology),
-            tooltip: 'Ability Scores',
-            onPressed: () {
-              Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                  builder: (context) => AbilityScoresPage(),
-                ),
-              );
-            },
-          ),
-          IconButton(
-            icon: Icon(Icons.refresh),
+            icon: const Icon(Icons.refresh),
             tooltip: 'Refresh Bonuses',
             onPressed: () async {
               // Force clear all cached data
@@ -411,22 +673,22 @@ class _MyHomePageState extends State<MyHomePage> {
               appState._currentBonuses = null;
               appState._bonusError = '';
               appState._isLoadingBonuses = false;
-              
+
               // Force refresh
               await appState.refreshBonuses();
-              
+
               // Print debug info
               print('Current bonuses after refresh: ${appState._currentBonuses}');
               print('Last refresh time: ${appState._lastBonusRefresh}');
-              
-              if (!mounted) return;
+
+              if (!context.mounted) return;
 
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(
                   content: Text(
-                    appState._bonusError.isEmpty 
-                      ? 'Bonuses refreshed!' 
-                      : 'Error: ${appState._bonusError}'
+                    appState._bonusError.isEmpty
+                        ? 'Bonuses refreshed!'
+                        : 'Error: ${appState._bonusError}',
                   ),
                   duration: Duration(seconds: 2),
                   behavior: SnackBarBehavior.floating,
@@ -438,6 +700,7 @@ class _MyHomePageState extends State<MyHomePage> {
       ),
       body: Column(
         children: [
+          ConnectionStatusCard(),
           Expanded(
             flex: 1,
             child: BigCard(),
@@ -480,6 +743,60 @@ class GeneratorPage extends StatelessWidget {
           ),
           Spacer(flex: 2),
         ],
+      ),
+    );
+  }
+}
+
+class ConnectionStatusCard extends StatelessWidget {
+  const ConnectionStatusCard({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final appState = context.watch<MyAppState>();
+    final statusColor = appState.isConnected ? Colors.green : Colors.orange;
+
+    return Card(
+      margin: EdgeInsets.fromLTRB(16, 12, 16, 0),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  appState.isConnected
+                      ? Icons.bluetooth_connected
+                      : Icons.bluetooth_disabled,
+                  color: statusColor,
+                  size: 18,
+                ),
+                SizedBox(width: 8),
+                Text(
+                  appState.connectionStatus,
+                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
+                ),
+              ],
+            ),
+            SizedBox(height: 6),
+            Text(
+              'Transport: Bluetooth Low Energy',
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: OutlinedButton.icon(
+                onPressed: appState.retryBleConnection,
+                icon: Icon(Icons.refresh),
+                label: Text('Retry BLE'),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -631,10 +948,6 @@ class _AbilityScoresPageState extends State<AbilityScoresPage> {
     return Scaffold(
       appBar: AppBar(
         title: Text('Ability Scores'),
-        leading: IconButton(
-          icon: Icon(Icons.arrow_back),
-          onPressed: () => Navigator.of(context).pop(),
-        ),
         actions: [
           IconButton(
             icon: Icon(Icons.refresh),
@@ -710,6 +1023,8 @@ class _AbilityScoresPageState extends State<AbilityScoresPage> {
     final theme = Theme.of(context);
     final maxHp = appState.maxHp;
     final maxTempHp = appState.maxTempHp;
+    final currentHp = appState.currentHp;
+    final currentTempHp = appState.currentTempHp;
 
     return Card(
       child: Padding(
@@ -726,8 +1041,8 @@ class _AbilityScoresPageState extends State<AbilityScoresPage> {
               spacing: 12,
               runSpacing: 8,
               children: [
-                _statChip(context, 'HP', '${appState.currentHp} / $maxHp'),
-                _statChip(context, 'Temp HP', '${appState.currentTempHp} / $maxTempHp'),
+                _statChip(context, 'HP', '$currentHp / $maxHp'),
+                _statChip(context, 'Temp HP', '$currentTempHp / $maxTempHp'),
               ],
             ),
             SizedBox(height: 12),
@@ -768,7 +1083,7 @@ class _AbilityScoresPageState extends State<AbilityScoresPage> {
                 ),
                 SizedBox(width: 12),
                 FilledButton(
-                  onPressed: () {
+                  onPressed: () async {
                     final raw = _hpDeltaController.text.trim();
                     final delta = int.tryParse(raw);
                     if (delta == null) {
@@ -792,6 +1107,21 @@ class _AbilityScoresPageState extends State<AbilityScoresPage> {
                     }
 
                     _hpDeltaController.clear();
+
+                    final saveError = await appState.persistCurrentHealthToSheet();
+                    if (!context.mounted) return;
+
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          saveError == null
+                              ? 'Health saved to sheet'
+                              : 'Saved locally, sheet update failed: $saveError',
+                        ),
+                        duration: Duration(seconds: 2),
+                        behavior: SnackBarBehavior.floating,
+                      ),
+                    );
                   },
                   child: Text('Apply'),
                 ),

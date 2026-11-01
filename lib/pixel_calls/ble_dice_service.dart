@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:typed_data';
 
-import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
+import 'package:universal_ble/universal_ble.dart';
 
 class PixelsBluetoothIds {
   static const String dieService = 'a6b90001-7a5a-43f2-a962-350c8edc9b5b';
@@ -14,13 +14,12 @@ class PixelsBluetoothIds {
 }
 
 class BleDiceService {
-  BleDiceService({FlutterReactiveBle? ble})
-      : _ble = ble ?? FlutterReactiveBle();
+  StreamSubscription<BleDevice>? _scanSub;
+  StreamSubscription<bool>? _connectionSub;
+  StreamSubscription<Uint8List>? _notifySub;
 
-  final FlutterReactiveBle _ble;
-  StreamSubscription<DiscoveredDevice>? _scanSub;
-  StreamSubscription<ConnectionStateUpdate>? _connectionSub;
-  StreamSubscription<List<int>>? _notifySub;
+  BleDevice? _connectedDevice;
+  BleCharacteristic? _notifyCharacteristic;
 
   final _rollController = StreamController<int>.broadcast();
   final _statusController = StreamController<String>.broadcast();
@@ -31,11 +30,12 @@ class BleDiceService {
   bool _usingLegacyService = false;
   static const bool _enableDebugLogs = false;
 
-  static final Uuid _dieServiceUuid = Uuid.parse(PixelsBluetoothIds.dieService);
-  static final Uuid _legacyServiceUuid =
-      Uuid.parse(PixelsBluetoothIds.legacyDieService);
-
   Future<void> connect() async {
+    final availability = await UniversalBle.getBluetoothAvailabilityState();
+    if (availability != AvailabilityState.poweredOn) {
+      throw Exception('Bluetooth appears to be off');
+    }
+
     _statusController.add('Scanning for Pixels die...');
     await _scanSub?.cancel();
 
@@ -44,33 +44,60 @@ class BleDiceService {
       throw Exception('No compatible Pixels die found nearby.');
     }
 
-    _statusController.add('Connecting to ${device.name.isEmpty ? 'dice' : device.name}...');
-    await _connectAndSubscribe(device.id, advertisedServices: device.serviceUuids);
+    final displayName =
+        (device.name == null || device.name!.isEmpty) ? 'dice' : device.name!;
+    _statusController.add('Connecting to $displayName...');
+    await _connectAndSubscribe(device, advertisedServices: device.services);
   }
 
   Future<void> disconnect() async {
     await _notifySub?.cancel();
+    _notifySub = null;
+
     await _connectionSub?.cancel();
+    _connectionSub = null;
+
     await _scanSub?.cancel();
+    _scanSub = null;
+
+    if (_notifyCharacteristic != null && _connectedDevice != null) {
+      try {
+        await _notifyCharacteristic!.unsubscribe();
+      } catch (_) {}
+      _notifyCharacteristic = null;
+    }
+
+    if (_connectedDevice != null) {
+      try {
+        await _connectedDevice!.disconnect();
+      } catch (_) {}
+      _connectedDevice = null;
+    }
+
+    try {
+      await UniversalBle.stopScan();
+    } catch (_) {}
   }
 
-  Future<DiscoveredDevice?> _findFirstDiceDevice() async {
-    final completer = Completer<DiscoveredDevice?>();
+  Future<BleDevice?> _findFirstDiceDevice() async {
+    final completer = Completer<BleDevice?>();
 
-    _scanSub = _ble
-        .scanForDevices(
-          withServices: const [],
-          scanMode: ScanMode.lowLatency,
-        )
-        .listen(
+    _scanSub = UniversalBle.scanStream.listen(
       (device) {
-        final serviceMatches = device.serviceUuids.any(
-          (uuid) => uuid == _dieServiceUuid || uuid == _legacyServiceUuid,
-        );
-        final name = device.name.toLowerCase();
-        final nameLooksLikePixels = name.contains('pixel') || name.contains('die');
+        final serviceMatches = _containsService(
+              device.services,
+              PixelsBluetoothIds.dieService,
+            ) ||
+            _containsService(
+              device.services,
+              PixelsBluetoothIds.legacyDieService,
+            );
+        final name = (device.name ?? '').toLowerCase();
+        final nameLooksLikePixels =
+            name.contains('pixel') || name.contains('die');
 
-        if (!completer.isCompleted && (serviceMatches || nameLooksLikePixels)) {
+        if (!completer.isCompleted &&
+            (serviceMatches || nameLooksLikePixels)) {
           completer.complete(device);
         }
       },
@@ -81,76 +108,67 @@ class BleDiceService {
       },
     );
 
+    await UniversalBle.startScan();
+
     final result = await completer.future.timeout(
       const Duration(seconds: 15),
       onTimeout: () => null,
     );
 
     await _scanSub?.cancel();
+    _scanSub = null;
+    await UniversalBle.stopScan();
     return result;
   }
 
   Future<void> _connectAndSubscribe(
-    String deviceId, {
-    required List<Uuid> advertisedServices,
+    BleDevice device, {
+    required List<String> advertisedServices,
   }) async {
-    _usingLegacyService = advertisedServices.contains(_legacyServiceUuid);
+    _connectedDevice = device;
 
-    final serviceUuid = Uuid.parse(
-      _usingLegacyService
-          ? PixelsBluetoothIds.legacyDieService
-          : PixelsBluetoothIds.dieService,
-    );
-    final notifyUuid = Uuid.parse(
-      _usingLegacyService
-          ? PixelsBluetoothIds.legacyDieNotifyCharacteristic
-          : PixelsBluetoothIds.dieNotifyCharacteristic,
-    );
+    final serviceId = await _resolveServiceId(device, advertisedServices);
+    _usingLegacyService =
+        BleUuidParser.compareStrings(serviceId, PixelsBluetoothIds.legacyDieService);
 
-    final connectionReady = Completer<void>();
+    final notifyId = _usingLegacyService
+        ? PixelsBluetoothIds.legacyDieNotifyCharacteristic
+        : PixelsBluetoothIds.dieNotifyCharacteristic;
 
     await _connectionSub?.cancel();
-    _connectionSub = _ble
-        .connectToDevice(
-          id: deviceId,
-          connectionTimeout: const Duration(seconds: 12),
-        )
-        .listen(
-      (update) async {
-        if (update.connectionState == DeviceConnectionState.connected &&
-            !connectionReady.isCompleted) {
+    _connectionSub = device.connectionStream.listen(
+      (isConnected) {
+        if (isConnected) {
           _statusController.add(_usingLegacyService
               ? 'Connected (legacy BLE profile)'
               : 'Connected (BLE profile)');
-          connectionReady.complete();
-        }
-        if (update.connectionState == DeviceConnectionState.disconnected) {
+        } else {
           _statusController.add('Disconnected');
         }
       },
       onError: (Object e) {
-        if (!connectionReady.isCompleted) {
-          connectionReady.completeError(e);
-        }
+        _statusController.add('Connection error: $e');
       },
     );
 
-    await connectionReady.future;
+    await device.connect(timeout: const Duration(seconds: 12));
 
-    final characteristic = QualifiedCharacteristic(
-      serviceId: serviceUuid,
-      characteristicId: notifyUuid,
-      deviceId: deviceId,
+    final characteristic = await device.getCharacteristic(
+      notifyId,
+      service: serviceId,
     );
+    _notifyCharacteristic = characteristic;
+
+    await characteristic.notifications.subscribe();
 
     await _notifySub?.cancel();
-    _notifySub = _ble.subscribeToCharacteristic(characteristic).listen(
+    _notifySub = characteristic.onValueReceived.listen(
       (bytes) {
         if (_enableDebugLogs) {
           final profile = _usingLegacyService ? 'legacy' : 'die';
           print('[BLE][$profile] notify bytes: $bytes');
         }
-        final maybeRoll = _tryParseRoll(Uint8List.fromList(bytes));
+        final maybeRoll = _tryParseRoll(bytes);
         if (maybeRoll != null) {
           if (_enableDebugLogs) {
             print('[BLE] parsed roll: $maybeRoll');
@@ -166,6 +184,47 @@ class BleDiceService {
     );
   }
 
+  Future<String> _resolveServiceId(
+    BleDevice device,
+    List<String> advertisedServices,
+  ) async {
+    if (_containsService(
+      advertisedServices,
+      PixelsBluetoothIds.legacyDieService,
+    )) {
+      return PixelsBluetoothIds.legacyDieService;
+    }
+    if (_containsService(advertisedServices, PixelsBluetoothIds.dieService)) {
+      return PixelsBluetoothIds.dieService;
+    }
+
+    final discovered = await device.discoverServices();
+    for (final service in discovered) {
+      if (BleUuidParser.compareStrings(
+        service.uuid,
+        PixelsBluetoothIds.dieService,
+      )) {
+        return PixelsBluetoothIds.dieService;
+      }
+    }
+    for (final service in discovered) {
+      if (BleUuidParser.compareStrings(
+        service.uuid,
+        PixelsBluetoothIds.legacyDieService,
+      )) {
+        return PixelsBluetoothIds.legacyDieService;
+      }
+    }
+
+    throw Exception('No compatible Pixels die service found.');
+  }
+
+  bool _containsService(List<String> services, String serviceUuid) {
+    return services.any(
+      (uuid) => BleUuidParser.compareStrings(uuid, serviceUuid),
+    );
+  }
+
   int? _tryParseRoll(Uint8List bytes) {
     // Pixels message hints from vendor repo:
     // - MessageTypeValues.rollState appears to be 3 (none=0, whoAreYou=1, iAmADie=2, rollState=3).
@@ -178,13 +237,13 @@ class BleDiceService {
     const int rollStateMessageType = 3;
     const int rolledState = 1;
 
-    // Primary path: exact framing seen in deserializeMessage(dataView).
-    // byte[0] is the message type, and rollState message is [type, state, faceIndex].
     if (bytes.length >= 3 && bytes[0] == rollStateMessageType) {
       final state = bytes[1];
       final faceIndex = bytes[2];
       if (_enableDebugLogs) {
-        print('[BLE] decoded direct message type=${bytes[0]} state=$state faceIndex=$faceIndex');
+        print(
+          '[BLE] decoded direct message type=${bytes[0]} state=$state faceIndex=$faceIndex',
+        );
       }
       if (state == rolledState) {
         final roll = faceIndex + 1;
