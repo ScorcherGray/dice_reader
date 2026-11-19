@@ -3,7 +3,14 @@ import 'dart:async';
 import 'dart:io' show Platform, SocketException;
 
 import 'package:http/http.dart' as http;
+import 'package:dice_reader/model/gear.dart';
+import 'package:dice_reader/model/spell.dart';
+import 'package:dice_reader/model/ability.dart';
+import 'package:dice_reader/model/combat_flow.dart';
 import 'package:dice_reader/model/user.dart';
+import 'package:dice_reader/pages/equipment_page.dart';
+import 'package:dice_reader/pages/spells_page.dart';
+import 'package:dice_reader/pages/combat_flow_page.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
@@ -11,9 +18,10 @@ import 'package:provider/provider.dart';
 import 'package:dice_reader/pixel_calls/ble_dice_service.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:universal_ble/universal_ble.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:convert' as convert;
 
-Future main() async{
+Future main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await dotenv.load(fileName: '.env');
 
@@ -50,8 +58,8 @@ class MyApp extends StatelessWidget {
           useMaterial3: true,
           colorScheme: ColorScheme.fromSeed(
             seedColor: Color.fromARGB(255, 255, 1, 1),
-            brightness: Brightness.dark,  // Dark theme
-            primary: Color.fromARGB(255, 114, 9, 9),   // Darker red
+            brightness: Brightness.dark, // Dark theme
+            primary: Color.fromARGB(255, 114, 9, 9), // Darker red
           ),
         ),
         home: MyHomePage(),
@@ -61,7 +69,7 @@ class MyApp extends StatelessWidget {
 }
 
 class MyAppState extends ChangeNotifier {
-  var history = <RollHistory>[];  // Initialize as empty RollHistory list
+  var history = <RollHistory>[]; // Initialize as empty RollHistory list
   var rollTotal = 0;
   var rollBonus = 0;
   final BleDiceService _bleDiceService = BleDiceService();
@@ -74,10 +82,10 @@ class MyAppState extends ChangeNotifier {
 
   int _retryCount = 0;
   static const int maxRetries = 5;
-  
+
   bool isConnected = false;
   String connectionStatus = 'Connecting...';
-  
+
   RollBonuses? _currentBonuses;
   bool _isLoadingBonuses = false;
   String _bonusError = '';
@@ -87,10 +95,22 @@ class MyAppState extends ChangeNotifier {
   int currentTempHp = 0;
   bool _healthInitialized = false;
 
+  final List<GearItem> gear = [];
+  final List<SpellItem> spells = [];
+  final List<AbilityItem> abilities = [];
+  final Map<String, int> combatCounters = {};
+  final List<String> customTriggerOrder = [];
+
   DateTime? _lastBonusRefresh;
-  static const Duration refreshInterval = Duration(minutes: 2);  // Adjust as needed
+  static const Duration refreshInterval =
+      Duration(minutes: 2); // Adjust as needed
 
   static const int maxHistoryLength = 12;
+  static const String _gearStorageKey = 'dice_reader_gear_list';
+  static const String _spellsStorageKey = 'dice_reader_spells_list';
+  static const String _abilitiesStorageKey = 'dice_reader_abilities_list';
+  static const String _combatCountersStorageKey = 'dice_reader_combat_counters';
+  static const String _triggerOrderStorageKey = 'dice_reader_trigger_order';
   String get _sheetBaseUrl => _env('SHEET_BASE_URL');
   static const String _characterName = 'Stats and Skills D';
   static const String _currentTempHpCell = 'L7';
@@ -106,8 +126,9 @@ class MyAppState extends ChangeNotifier {
       dotenv.isInitialized ? (dotenv.env[key] ?? '').trim() : '';
 
   MyAppState() {
+    _loadPersistedData();
     connectToBleDice();
-    refreshBonuses();  // Prefetch bonuses immediately
+    refreshBonuses(); // Prefetch bonuses immediately
   }
 
   void removeFromHistory(RollHistory rollHistory) {
@@ -125,8 +146,8 @@ class MyAppState extends ChangeNotifier {
   Future<void> refreshBonuses() async {
     print('Starting refresh. Current bonuses: $_currentBonuses');
     print('Last refresh: $_lastBonusRefresh');
-    
-    if (_lastBonusRefresh != null && 
+
+    if (_lastBonusRefresh != null &&
         DateTime.now().difference(_lastBonusRefresh!) < refreshInterval) {
       print('Using cached bonuses, skipping refresh');
       return;
@@ -150,33 +171,40 @@ class MyAppState extends ChangeNotifier {
       ).timeout(
         Duration(seconds: 10),
         onTimeout: () {
-          throw TimeoutException('Connection timed out. Please check your internet connection.');
+          throw TimeoutException(
+              'Connection timed out. Please check your internet connection.');
         },
       );
-      
+
       print('Response status: ${response.statusCode}');
       print('Response body: ${response.body}');
-      
+
       if (response.statusCode == 200) {
         final body = response.body.trim();
         if (body.isEmpty || (!body.startsWith('{') && !body.startsWith('['))) {
-          _bonusError = 'Google Script returned an error page instead of data. Check your script (e.g. getSheetByName).';
-          print('Response is not JSON (starts with: ${body.length > 50 ? body.substring(0, 50) : body})');
+          _bonusError =
+              'Google Script returned an error page instead of data. Check your script (e.g. getSheetByName).';
+          print(
+              'Response is not JSON (starts with: ${body.length > 50 ? body.substring(0, 50) : body})');
         } else {
           try {
-            final jsonBonuses = convert.jsonDecode(response.body) as Map<String, dynamic>;
+            final jsonBonuses =
+                convert.jsonDecode(response.body) as Map<String, dynamic>;
             _currentBonuses = RollBonuses.fromJson(jsonBonuses);
             _syncHealthFromBonuses();
             _lastBonusRefresh = DateTime.now();
             print('Successfully updated bonuses: $_currentBonuses');
           } on FormatException catch (e) {
-            _bonusError = 'Google Script returned invalid data. Check your script.';
+            _bonusError =
+                'Google Script returned invalid data. Check your script.';
             print('JSON parse error: $e');
           }
         }
       } else if (response.statusCode == 403) {
-        _bonusError = 'Access denied: Google Script not publicly accessible. Check script deployment settings.';
-        print('403 Error: Google Apps Script access denied. Ensure the script is deployed with "Anyone" access.');
+        _bonusError =
+            'Access denied: Google Script not publicly accessible. Check script deployment settings.';
+        print(
+            '403 Error: Google Apps Script access denied. Ensure the script is deployed with "Anyone" access.');
       } else {
         _bonusError = 'Server error: ${response.statusCode}';
       }
@@ -230,8 +258,480 @@ class MyAppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> _loadPersistedData() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+
+      final gearJsonString = prefs.getString(_gearStorageKey);
+      if (gearJsonString != null && gearJsonString.isNotEmpty) {
+        final decoded = convert.jsonDecode(gearJsonString);
+        if (decoded is List) {
+          gear.clear();
+          for (final item in decoded) {
+            if (item is Map<String, dynamic>) {
+              gear.add(GearItem.fromJson(item));
+            }
+          }
+        }
+      }
+
+      final spellsJsonString = prefs.getString(_spellsStorageKey);
+      if (spellsJsonString != null && spellsJsonString.isNotEmpty) {
+        final decoded = convert.jsonDecode(spellsJsonString);
+        if (decoded is List) {
+          spells.clear();
+          for (final item in decoded) {
+            if (item is Map<String, dynamic>) {
+              spells.add(SpellItem.fromJson(item));
+            }
+          }
+        }
+      }
+
+      final abilitiesJsonString = prefs.getString(_abilitiesStorageKey);
+      if (abilitiesJsonString != null && abilitiesJsonString.isNotEmpty) {
+        final decoded = convert.jsonDecode(abilitiesJsonString);
+        if (decoded is List) {
+          abilities.clear();
+          for (final item in decoded) {
+            if (item is Map<String, dynamic>) {
+              abilities.add(AbilityItem.fromJson(item));
+            }
+          }
+        }
+      }
+
+      final countersJsonString = prefs.getString(_combatCountersStorageKey);
+      if (countersJsonString != null && countersJsonString.isNotEmpty) {
+        final decoded = convert.jsonDecode(countersJsonString);
+        if (decoded is Map<String, dynamic>) {
+          combatCounters.clear();
+          decoded.forEach((key, value) {
+            if (value is int) {
+              combatCounters[key] = value;
+            }
+          });
+        }
+      }
+
+      final orderJsonString = prefs.getString(_triggerOrderStorageKey);
+      if (orderJsonString != null && orderJsonString.isNotEmpty) {
+        final decoded = convert.jsonDecode(orderJsonString);
+        if (decoded is List) {
+          customTriggerOrder.clear();
+          for (final item in decoded) {
+            if (item is String) customTriggerOrder.add(item);
+          }
+        }
+      }
+
+      notifyListeners();
+    } catch (e) {
+      print('Error loading persisted data: $e');
+    }
+  }
+
+  Future<void> _saveGearToStorage() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final encoded = convert.jsonEncode(gear.map((e) => e.toJson()).toList());
+      await prefs.setString(_gearStorageKey, encoded);
+    } catch (e) {
+      print('Error saving gear to storage: $e');
+    }
+  }
+
+  Future<void> _saveSpellsToStorage() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final encoded =
+          convert.jsonEncode(spells.map((e) => e.toJson()).toList());
+      await prefs.setString(_spellsStorageKey, encoded);
+    } catch (e) {
+      print('Error saving spells to storage: $e');
+    }
+  }
+
+  Future<void> _saveAbilitiesToStorage() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final encoded =
+          convert.jsonEncode(abilities.map((e) => e.toJson()).toList());
+      await prefs.setString(_abilitiesStorageKey, encoded);
+    } catch (e) {
+      print('Error saving abilities to storage: $e');
+    }
+  }
+
+  Future<void> _saveCombatCountersToStorage() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final encoded = convert.jsonEncode(combatCounters);
+      await prefs.setString(_combatCountersStorageKey, encoded);
+    } catch (e) {
+      print('Error saving combat counters to storage: $e');
+    }
+  }
+
+  Future<void> _saveTriggerOrderToStorage() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final encoded = convert.jsonEncode(customTriggerOrder);
+      await prefs.setString(_triggerOrderStorageKey, encoded);
+    } catch (e) {
+      print('Error saving trigger order to storage: $e');
+    }
+  }
+
+  List<CombatTriggerItem> get activeCombatTriggers {
+    final results = <CombatTriggerItem>[];
+
+    // Equipped Gear
+    for (final item in gear.where((g) => g.equipped)) {
+      results.addAll(CombatFlowParser.parse(
+        sourceId: item.id,
+        sourceName: item.name,
+        sourceType: 'gear',
+        description: item.description,
+        counters: combatCounters,
+      ));
+    }
+
+    // Prepared Spells
+    for (final spell in spells.where((s) => s.prepared)) {
+      results.addAll(CombatFlowParser.parse(
+        sourceId: spell.id,
+        sourceName: spell.name,
+        sourceType: 'spell',
+        description: spell.description,
+        counters: combatCounters,
+      ));
+    }
+
+    // Active Abilities & Boons
+    for (final ability in abilities.where((a) => a.isActive)) {
+      results.addAll(CombatFlowParser.parse(
+        sourceId: ability.id,
+        sourceName: ability.name,
+        sourceType: 'ability',
+        description: ability.description,
+        counters: combatCounters,
+      ));
+    }
+
+    // Sort by automatic tag grouping by default (e.g. all "Cast Glyph of Warding" sit together)
+    results.sort(CombatFlowParser.compareTriggers);
+
+    // If the user has manually reordered items, apply the custom ordering
+    if (customTriggerOrder.isNotEmpty) {
+      results.sort((a, b) {
+        final indexA = customTriggerOrder.indexOf(a.id);
+        final indexB = customTriggerOrder.indexOf(b.id);
+        if (indexA != -1 && indexB != -1) {
+          return indexA.compareTo(indexB);
+        }
+        if (indexA != -1) return -1;
+        if (indexB != -1) return 1;
+        return CombatFlowParser.compareTriggers(a, b);
+      });
+    }
+
+    return results;
+  }
+
+  void reorderCombatTriggers(
+      int oldIndex, int newIndex, List<CombatTriggerItem> currentList) {
+    if (oldIndex < newIndex) {
+      newIndex -= 1;
+    }
+    final item = currentList.removeAt(oldIndex);
+    currentList.insert(newIndex, item);
+
+    customTriggerOrder.clear();
+    for (final t in currentList) {
+      customTriggerOrder.add(t.id);
+    }
+    _saveTriggerOrderToStorage();
+    notifyListeners();
+  }
+
+  void resetTriggerOrderToGrouped() {
+    customTriggerOrder.clear();
+    _saveTriggerOrderToStorage();
+    notifyListeners();
+  }
+
+  String exportAllDataAsJson() {
+    final data = {
+      'exportedAt': DateTime.now().toIso8601String(),
+      'gear': gear.map((g) => g.toJson()).toList(),
+      'spells': spells.map((s) => s.toJson()).toList(),
+      'abilities': abilities.map((a) => a.toJson()).toList(),
+      'combatCounters': combatCounters,
+      'customTriggerOrder': customTriggerOrder,
+    };
+    return convert.jsonEncode(data);
+  }
+
+  void addAbility({
+    required String name,
+    String description = '',
+    String category = 'Class Feature',
+    int usesMax = 0,
+    int usesRemaining = 0,
+    bool isActive = true,
+  }) {
+    abilities.add(AbilityItem(
+      id: DateTime.now().microsecondsSinceEpoch.toString(),
+      name: name,
+      description: description,
+      category: category,
+      usesMax: usesMax,
+      usesRemaining: usesRemaining > 0 ? usesRemaining : usesMax,
+      isActive: isActive,
+    ));
+    _saveAbilitiesToStorage();
+    notifyListeners();
+  }
+
+  void updateAbility({
+    required String id,
+    required String name,
+    required String description,
+    required String category,
+    required int usesMax,
+    required int usesRemaining,
+    required bool isActive,
+  }) {
+    for (final item in abilities) {
+      if (item.id == id) {
+        item.name = name;
+        item.description = description;
+        item.category = category;
+        item.usesMax = usesMax < 0 ? 0 : usesMax;
+        item.usesRemaining =
+            usesRemaining.clamp(0, item.usesMax > 0 ? item.usesMax : 999);
+        item.isActive = isActive;
+        _saveAbilitiesToStorage();
+        notifyListeners();
+        return;
+      }
+    }
+  }
+
+  void toggleAbilityActive(String id) {
+    for (final item in abilities) {
+      if (item.id == id) {
+        item.isActive = !item.isActive;
+        _saveAbilitiesToStorage();
+        notifyListeners();
+        return;
+      }
+    }
+  }
+
+  void adjustAbilityUses(String id, int delta) {
+    for (final item in abilities) {
+      if (item.id == id && item.usesMax > 0) {
+        item.usesRemaining =
+            (item.usesRemaining + delta).clamp(0, item.usesMax);
+        _saveAbilitiesToStorage();
+        notifyListeners();
+        return;
+      }
+    }
+  }
+
+  void resetAllAbilityUses() {
+    for (final item in abilities) {
+      if (item.usesMax > 0) {
+        item.usesRemaining = item.usesMax;
+      }
+    }
+    _saveAbilitiesToStorage();
+    notifyListeners();
+  }
+
+  void removeAbility(String id) {
+    abilities.removeWhere((item) => item.id == id);
+    _saveAbilitiesToStorage();
+    notifyListeners();
+  }
+
+  void adjustCombatCounter(String key, int delta) {
+    final current = combatCounters[key] ?? 0;
+    final next = current + delta;
+    combatCounters[key] = next < 0 ? 0 : next;
+    _saveCombatCountersToStorage();
+    notifyListeners();
+  }
+
+  void resetCombatCounter(String key) {
+    combatCounters[key] = 0;
+    _saveCombatCountersToStorage();
+    notifyListeners();
+  }
+
+  void resetAllCombatCounters() {
+    combatCounters.clear();
+    _saveCombatCountersToStorage();
+    notifyListeners();
+  }
+
+  void addGear({
+    required String name,
+    String description = '',
+    int quantity = 1,
+    bool equipped = false,
+  }) {
+    gear.add(GearItem(
+      id: DateTime.now().microsecondsSinceEpoch.toString(),
+      name: name,
+      description: description,
+      quantity: quantity,
+      equipped: equipped,
+    ));
+    _saveGearToStorage();
+    notifyListeners();
+  }
+
+  void updateGear({
+    required String id,
+    required String name,
+    required String description,
+    required int quantity,
+    required bool equipped,
+  }) {
+    for (final item in gear) {
+      if (item.id == id) {
+        item.name = name;
+        item.description = description;
+        item.quantity = quantity < 1 ? 1 : quantity;
+        item.equipped = equipped;
+        _saveGearToStorage();
+        notifyListeners();
+        return;
+      }
+    }
+  }
+
+  void adjustGearQuantity(String id, int delta) {
+    for (final item in gear) {
+      if (item.id == id) {
+        final newQuantity = item.quantity + delta;
+        item.quantity = newQuantity < 1 ? 1 : newQuantity;
+        _saveGearToStorage();
+        notifyListeners();
+        return;
+      }
+    }
+  }
+
+  void toggleGearEquipped(String id) {
+    for (final item in gear) {
+      if (item.id == id) {
+        item.equipped = !item.equipped;
+        _saveGearToStorage();
+        notifyListeners();
+        return;
+      }
+    }
+  }
+
+  void removeGear(String id) {
+    gear.removeWhere((item) => item.id == id);
+    _saveGearToStorage();
+    notifyListeners();
+  }
+
+  void addSpell({
+    required String name,
+    String description = '',
+    int level = 0,
+    int preparedCount = 0,
+    bool prepared = false,
+  }) {
+    final count = preparedCount > 0 ? preparedCount : (prepared ? 1 : 0);
+    spells.add(SpellItem(
+      id: DateTime.now().microsecondsSinceEpoch.toString(),
+      name: name,
+      description: description,
+      level: level,
+      preparedCount: count,
+    ));
+    _saveSpellsToStorage();
+    notifyListeners();
+  }
+
+  void updateSpell({
+    required String id,
+    required String name,
+    required String description,
+    required int level,
+    required int preparedCount,
+  }) {
+    for (final item in spells) {
+      if (item.id == id) {
+        item.name = name;
+        item.description = description;
+        item.level = level;
+        item.preparedCount = preparedCount < 0 ? 0 : preparedCount;
+        _saveSpellsToStorage();
+        notifyListeners();
+        return;
+      }
+    }
+  }
+
+  void incrementSpellPrepared(String id) {
+    for (final item in spells) {
+      if (item.id == id) {
+        item.preparedCount++;
+        _saveSpellsToStorage();
+        notifyListeners();
+        return;
+      }
+    }
+  }
+
+  void decrementSpellPrepared(String id) {
+    for (final item in spells) {
+      if (item.id == id) {
+        if (item.preparedCount > 0) {
+          item.preparedCount--;
+          _saveSpellsToStorage();
+          notifyListeners();
+        }
+        return;
+      }
+    }
+  }
+
+  void toggleSpellPrepared(String id) {
+    for (final item in spells) {
+      if (item.id == id) {
+        if (item.preparedCount > 0) {
+          item.preparedCount = 0;
+        } else {
+          item.preparedCount = 1;
+        }
+        _saveSpellsToStorage();
+        notifyListeners();
+        return;
+      }
+    }
+  }
+
+  void removeSpell(String id) {
+    spells.removeWhere((item) => item.id == id);
+    _saveSpellsToStorage();
+    notifyListeners();
+  }
+
   void applyHealthChange(int delta) {
-    if (maxHp <= 0 && maxTempHp <= 0) return; // Why prevent adjustments when maxHp and maxTempHp are 0?
+    if (maxHp <= 0 && maxTempHp <= 0) {
+      return; // Why prevent adjustments when maxHp and maxTempHp are 0?
+    }
     if (delta == 0) return;
 
     if (delta > 0) {
@@ -244,7 +744,8 @@ class MyAppState extends ChangeNotifier {
     var dmg = -delta; // flip negative delta into positive damage amount
 
     // Temp HP first
-    final tempUsed = dmg.clamp(0, currentTempHp); // What happens when currentTempHp is 0?
+    final tempUsed =
+        dmg.clamp(0, currentTempHp); // What happens when currentTempHp is 0?
     currentTempHp -= tempUsed;
     dmg -= tempUsed;
 
@@ -259,12 +760,12 @@ class MyAppState extends ChangeNotifier {
   void handleBonusAndText(int value) async {
     // Update UI immediately with loading state
     buttonText = 'Loading...';
-    rollTotal = 0;  // Reset the roll total when a new button is pressed
+    rollTotal = 0; // Reset the roll total when a new button is pressed
     notifyListeners();
-    
+
     // Refresh bonuses in background
     await refreshBonuses();
-    
+
     if (_bonusError.isNotEmpty) {
       print('Error refreshing bonuses: $_bonusError');
       return;
@@ -365,8 +866,7 @@ class MyAppState extends ChangeNotifier {
       final scanStatus = await Permission.bluetoothScan.request();
       final connectStatus = await Permission.bluetoothConnect.request();
 
-      if (scanStatus.isPermanentlyDenied ||
-          connectStatus.isPermanentlyDenied) {
+      if (scanStatus.isPermanentlyDenied || connectStatus.isPermanentlyDenied) {
         connectionStatus =
             'Bluetooth permission permanently denied in Settings';
         notifyListeners();
@@ -440,19 +940,19 @@ class MyAppState extends ChangeNotifier {
       print('\nBody: $body');
       return http
           .post(
-            uri,
-            headers: {
-              'Accept': 'application/json',
-              'Content-Type': 'application/json',
-            },
-            body: body,
-          )
+        uri,
+        headers: {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+        },
+        body: body,
+      )
           .timeout(
-            Duration(seconds: 10),
-            onTimeout: () {
-              throw TimeoutException('Timed out writing $cell to sheet.');
-            },
-          );
+        Duration(seconds: 10),
+        onTimeout: () {
+          throw TimeoutException('Timed out writing $cell to sheet.');
+        },
+      );
     }
 
     var response = await sendPost(Uri.parse(_sheetBaseUrl));
@@ -468,33 +968,32 @@ class MyAppState extends ChangeNotifier {
 
       final redirectedUri = Uri.parse(_sheetBaseUrl).resolve(location);
       print('Following Apps Script redirect with GET: $redirectedUri');
-      response = await http
-          .get(
-            redirectedUri,
-            headers: {
-              'Accept': 'application/json',
-            },
-          )
-          .timeout(
-            Duration(seconds: 10),
-            onTimeout: () {
-              throw TimeoutException(
-                'Timed out reading redirect response for $cell.',
-              );
-            },
+      response = await http.get(
+        redirectedUri,
+        headers: {
+          'Accept': 'application/json',
+        },
+      ).timeout(
+        Duration(seconds: 10),
+        onTimeout: () {
+          throw TimeoutException(
+            'Timed out reading redirect response for $cell.',
           );
+        },
+      );
     }
 
     if (response.statusCode != 200) {
-      print('Sheet update failed ($cell): HTTP ${response.statusCode}. Body: ${response.body}');
+      print(
+          'Sheet update failed ($cell): HTTP ${response.statusCode}. Body: ${response.body}');
       throw Exception(
-        'Sheet update failed ($cell): HTTP ${response.statusCode}. '
-      );
+          'Sheet update failed ($cell): HTTP ${response.statusCode}. ');
     }
 
     final decoded = convert.jsonDecode(response.body);
     if (decoded is! Map<String, dynamic> || decoded['result'] != 'success') {
-      print('Sheet update failed ($cell): HTTP ${response.statusCode}. Body: ${response.body}');
+      print(
+          'Sheet update failed ($cell): HTTP ${response.statusCode}. Body: ${response.body}');
       throw Exception('Sheet update failed ($cell): ${response.body}');
     }
   }
@@ -504,7 +1003,7 @@ class MyAppState extends ChangeNotifier {
       int delaySeconds = 1 << _retryCount;
       connectionStatus = 'Reconnecting in $delaySeconds seconds...';
       notifyListeners();
-      
+
       Future.delayed(
         Duration(seconds: delaySeconds),
         () {
@@ -530,15 +1029,17 @@ class MyAppState extends ChangeNotifier {
     if (history.length >= maxHistoryLength) {
       history.removeLast();
     }
-    
-    history.insert(0, RollHistory(
-      total: rollTotal,
-      roll: roll,
-      bonus: rollBonus,
-      rollType: buttonText.replaceAll(':', '').trim(),
-      timestamp: DateTime.now(),
-    ));
-    
+
+    history.insert(
+        0,
+        RollHistory(
+          total: rollTotal,
+          roll: roll,
+          bonus: rollBonus,
+          rollType: buttonText.replaceAll(':', '').trim(),
+          timestamp: DateTime.now(),
+        ));
+
     var animatedList = historyListKey?.currentState as AnimatedListState?;
     if (animatedList != null) {
       animatedList.insertItem(0);
@@ -575,15 +1076,15 @@ class MyAppState extends ChangeNotifier {
       embed['thumbnail'] = {'url': _discordThumbnailUrl};
     }
 
-    final body = convert.jsonEncode({'embeds': [embed]});
+    final body = convert.jsonEncode({
+      'embeds': [embed]
+    });
     final headers = {
       'Content-Type': 'application/json',
       'User-Agent': 'dice_reader (Flutter; webhook)',
     };
 
-    var uri = Uri.parse(_discordWebhookUrl).replace(
-      queryParameters: {'wait': 'true'},
-    );
+    var uri = Uri.parse(_discordWebhookUrl);
     Object? lastError;
 
     for (var attempt = 1; attempt <= 3; attempt++) {
@@ -621,34 +1122,59 @@ class MyHomePage extends StatefulWidget {
 class ToggleButtonsRolls extends StatefulWidget {
   const ToggleButtonsRolls({super.key});
 
-
   @override
-  State<ToggleButtonsRolls> createState () => _ToggleButtonsRollState();
+  State<ToggleButtonsRolls> createState() => _ToggleButtonsRollState();
 }
 
 class _MyHomePageState extends State<MyHomePage> {
-  late final PageController _pageController;
-
-  @override
-  void initState() {
-    super.initState();
-    _pageController = PageController();
-  }
-
-  @override
-  void dispose() {
-    _pageController.dispose();
-    super.dispose();
-  }
+  int _selectedIndex = 0;
 
   @override
   Widget build(BuildContext context) {
-    return PageView(
-      controller: _pageController,
-      children: [
-        RollBonusesPage(),
-        AbilityScoresPage(),
-      ],
+    return Scaffold(
+      body: IndexedStack(
+        index: _selectedIndex,
+        children: [
+          RollBonusesPage(),
+          CombatFlowPage(),
+          AbilityScoresPage(),
+          EquipmentPage(),
+          SpellsPage(),
+        ],
+      ),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _selectedIndex,
+        onDestinationSelected: (index) {
+          setState(() => _selectedIndex = index);
+        },
+        destinations: const [
+          NavigationDestination(
+            icon: Icon(Icons.casino_outlined),
+            selectedIcon: Icon(Icons.casino),
+            label: 'Rolls',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.bolt_outlined),
+            selectedIcon: Icon(Icons.bolt),
+            label: 'Combat',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.favorite_outline),
+            selectedIcon: Icon(Icons.favorite),
+            label: 'Stats',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.inventory_2_outlined),
+            selectedIcon: Icon(Icons.inventory_2),
+            label: 'Gear',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.book_outlined),
+            selectedIcon: Icon(Icons.book),
+            label: 'Spells',
+          ),
+        ],
+      ),
     );
   }
 }
@@ -678,7 +1204,8 @@ class RollBonusesPage extends StatelessWidget {
               await appState.refreshBonuses();
 
               // Print debug info
-              print('Current bonuses after refresh: ${appState._currentBonuses}');
+              print(
+                  'Current bonuses after refresh: ${appState._currentBonuses}');
               print('Last refresh time: ${appState._lastBonusRefresh}');
 
               if (!context.mounted) return;
@@ -709,10 +1236,7 @@ class RollBonusesPage extends StatelessWidget {
             flex: 3,
             child: HistoryListView(),
           ),
-          Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: ToggleButtonsRolls(),
-          ),
+          ToggleButtonsRolls(),
         ],
       ),
     );
@@ -722,7 +1246,6 @@ class RollBonusesPage extends StatelessWidget {
 class GeneratorPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
-
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -735,11 +1258,8 @@ class GeneratorPage extends StatelessWidget {
           BigCard(),
           SizedBox(height: 10),
           Row(
-            
             mainAxisSize: MainAxisSize.min,
-            children: [
-              ToggleButtonsRolls()
-            ],
+            children: [ToggleButtonsRolls()],
           ),
           Spacer(flex: 2),
         ],
@@ -806,7 +1326,7 @@ class BigCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     var appState = context.watch<MyAppState>();
-    
+
     return Card(
       color: Theme.of(context).colorScheme.primaryContainer,
       elevation: 8,
@@ -814,51 +1334,61 @@ class BigCard extends StatelessWidget {
       child: Container(
         padding: EdgeInsets.symmetric(vertical: 12, horizontal: 16),
         constraints: BoxConstraints.expand(),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          mainAxisSize: MainAxisSize.max,
-          children: [
-            if (appState._isLoadingBonuses)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 4.0),
-                child: CircularProgressIndicator(),
-              ),
-            if (appState._bonusError.isNotEmpty)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 4.0),
-                child: Text(
-                  appState._bonusError,
-                  style: TextStyle(color: Colors.red[300]),
+        alignment: Alignment.center,
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (appState._isLoadingBonuses)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 4.0),
+                  child: CircularProgressIndicator(),
+                ),
+              if (appState._bonusError.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 4.0),
+                  child: Text(
+                    appState._bonusError,
+                    style: TextStyle(color: Colors.red[300]),
+                  ),
+                ),
+              AnimatedSize(
+                duration: Duration(milliseconds: 200),
+                child: MergeSemantics(
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Text(
+                        appState.buttonText,
+                        style:
+                            Theme.of(context).textTheme.headlineLarge!.copyWith(
+                                  color: Theme.of(context)
+                                      .colorScheme
+                                      .onPrimaryContainer,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 32,
+                                ),
+                      ),
+                      SizedBox(width: 12),
+                      Text(
+                        appState.rollTotal.toString(),
+                        style:
+                            Theme.of(context).textTheme.headlineLarge!.copyWith(
+                                  color: Theme.of(context)
+                                      .colorScheme
+                                      .onPrimaryContainer,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 32,
+                                ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
-            AnimatedSize(
-              duration: Duration(milliseconds: 200),
-              child: MergeSemantics(
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Text(
-                      appState.buttonText, 
-                      style: Theme.of(context).textTheme.headlineLarge!.copyWith(
-                        color: Theme.of(context).colorScheme.onPrimaryContainer,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 32,
-                      ),
-                    ),
-                    SizedBox(width: 12),
-                    Text(
-                      appState.rollTotal.toString(),
-                      style: Theme.of(context).textTheme.headlineLarge!.copyWith(
-                        color: Theme.of(context).colorScheme.onPrimaryContainer,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 32,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -928,7 +1458,7 @@ class AbilityScoresPage extends StatefulWidget {
   State<AbilityScoresPage> createState() => _AbilityScoresPageState();
 }
 
-enum HealthTarget { auto, hp, tempHp}
+enum HealthTarget { auto, hp, tempHp }
 
 class _AbilityScoresPageState extends State<AbilityScoresPage> {
   final TextEditingController _hpDeltaController = TextEditingController();
@@ -1002,7 +1532,8 @@ class _AbilityScoresPageState extends State<AbilityScoresPage> {
                               fontWeight: FontWeight.bold,
                             ),
                           ),
-                          subtitle: Text('Score: $score  •  Modifier: ${_formatMod(mod)}'),
+                          subtitle: Text(
+                              'Score: $score  •  Modifier: ${_formatMod(mod)}'),
                           trailing: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
@@ -1034,7 +1565,8 @@ class _AbilityScoresPageState extends State<AbilityScoresPage> {
           children: [
             Text(
               'Health',
-              style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
+              style: theme.textTheme.titleMedium
+                  ?.copyWith(fontWeight: FontWeight.bold),
             ),
             SizedBox(height: 8),
             Wrap(
@@ -1052,7 +1584,8 @@ class _AbilityScoresPageState extends State<AbilityScoresPage> {
                 ChoiceChip(
                   label: Text('Auto'),
                   selected: _target == HealthTarget.auto,
-                  onSelected: (_) => setState(() => _target = HealthTarget.auto),
+                  onSelected: (_) =>
+                      setState(() => _target = HealthTarget.auto),
                 ),
                 ChoiceChip(
                   label: Text('HP'),
@@ -1062,7 +1595,8 @@ class _AbilityScoresPageState extends State<AbilityScoresPage> {
                 ChoiceChip(
                   label: Text('Temp HP'),
                   selected: _target == HealthTarget.tempHp,
-                  onSelected: (_) => setState(() => _target = HealthTarget.tempHp),
+                  onSelected: (_) =>
+                      setState(() => _target = HealthTarget.tempHp),
                 ),
               ],
             ),
@@ -1071,15 +1605,14 @@ class _AbilityScoresPageState extends State<AbilityScoresPage> {
               children: [
                 Expanded(
                   child: TextField(
-                    controller: _hpDeltaController,
-                    keyboardType: TextInputType.number,
-                    decoration: InputDecoration(
-                      labelText: 'Damage / Heal',
-                      hintText: '-8 for damage, 5 for healing',
-                      border: OutlineInputBorder(),
-                      isDense: true,
-                    )
-                  ),
+                      controller: _hpDeltaController,
+                      keyboardType: TextInputType.number,
+                      decoration: InputDecoration(
+                        labelText: 'Damage / Heal',
+                        hintText: '-8 for damage, 5 for healing',
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                      )),
                 ),
                 SizedBox(width: 12),
                 FilledButton(
@@ -1108,7 +1641,8 @@ class _AbilityScoresPageState extends State<AbilityScoresPage> {
 
                     _hpDeltaController.clear();
 
-                    final saveError = await appState.persistCurrentHealthToSheet();
+                    final saveError =
+                        await appState.persistCurrentHealthToSheet();
                     if (!context.mounted) return;
 
                     ScaffoldMessenger.of(context).showSnackBar(
@@ -1130,10 +1664,10 @@ class _AbilityScoresPageState extends State<AbilityScoresPage> {
             SizedBox(height: 6),
             Text(
               _target == HealthTarget.auto
-                ? 'Auto: damage hits Temp HP then HP. Healing affects HP only.'
-                : _target == HealthTarget.hp
-                  ? 'HP: damage and healing affect HP only.'
-                  : 'Temp HP: damage and healing affect Temp HP only.',
+                  ? 'Auto: damage hits Temp HP then HP. Healing affects HP only.'
+                  : _target == HealthTarget.hp
+                      ? 'HP: damage and healing affect HP only.'
+                      : 'Temp HP: damage and healing affect Temp HP only.',
               style: theme.textTheme.bodySmall?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,
               ),
@@ -1147,29 +1681,42 @@ class _AbilityScoresPageState extends State<AbilityScoresPage> {
   int _getScore(RollBonuses? b, int index) {
     if (b == null) return 0;
     switch (index) {
-      case 0: return b.strScore;
-      case 1: return b.conScore;
-      case 2: return b.dexScore;
-      case 3: return b.intScore;
-      case 4: return b.wisScore;
-      case 5: return b.chaScore;
-      default: return 0;
+      case 0:
+        return b.strScore;
+      case 1:
+        return b.conScore;
+      case 2:
+        return b.dexScore;
+      case 3:
+        return b.intScore;
+      case 4:
+        return b.wisScore;
+      case 5:
+        return b.chaScore;
+      default:
+        return 0;
     }
   }
 
   int _getMod(RollBonuses? b, int index) {
     if (b == null) return 0;
     switch (index) {
-      case 0: return b.strMod;
-      case 1: return b.conMod;
-      case 2: return b.dexMod;
-      case 3: return b.intMod;
-      case 4: return b.wisMod;
-      case 5: return b.chaMod;
-      default: return 0;
+      case 0:
+        return b.strMod;
+      case 1:
+        return b.conMod;
+      case 2:
+        return b.dexMod;
+      case 3:
+        return b.intMod;
+      case 4:
+        return b.wisMod;
+      case 5:
+        return b.chaMod;
+      default:
+        return 0;
     }
   }
-  
 
   String _formatMod(int mod) => mod >= 0 ? '+$mod' : '$mod';
 
@@ -1190,8 +1737,8 @@ class _AbilityScoresPageState extends State<AbilityScoresPage> {
           Text(
             value,
             style: Theme.of(context).textTheme.titleMedium?.copyWith(
-              fontWeight: FontWeight.bold,
-            ),
+                  fontWeight: FontWeight.bold,
+                ),
           ),
         ],
       ),
@@ -1225,11 +1772,12 @@ class _ToggleButtonsRollState extends State<ToggleButtonsRolls> {
   @override
   Widget build(BuildContext context) {
     final appState = context.watch<MyAppState>();
-    _selectedRolls = List.filled(6, false);  // Total number of buttons
-    
+    _selectedRolls = List.filled(6, false); // Total number of buttons
+
     return Padding(
-      padding: const EdgeInsets.all(16.0),
-      child: Column(  // Changed from Wrap to Column
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+      child: Column(
+        // Changed from Wrap to Column
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           // Top row (No bonus, Attack, Caster Lvl)
@@ -1243,8 +1791,10 @@ class _ToggleButtonsRollState extends State<ToggleButtonsRolls> {
               borderColor: Theme.of(context).colorScheme.primary,
               borderWidth: 2,
               borderRadius: BorderRadius.circular(8),
-              constraints: BoxConstraints(minHeight: 80, minWidth: 100),
-              children: topRowMap.entries.map((ele) => _buildButtonContent(ele)).toList(),
+              constraints: BoxConstraints(minHeight: 64, minWidth: 88),
+              children: topRowMap.entries
+                  .map((ele) => _buildButtonContent(ele))
+                  .toList(),
               onPressed: (value) async {
                 await appState.refreshBonuses();
                 setState(() {
@@ -1264,12 +1814,15 @@ class _ToggleButtonsRollState extends State<ToggleButtonsRolls> {
             borderColor: Theme.of(context).colorScheme.primary,
             borderWidth: 2,
             borderRadius: BorderRadius.circular(8),
-            constraints: BoxConstraints(minHeight: 80, minWidth: 100),
-            children: bottomRowMap.entries.map((ele) => _buildButtonContent(ele)).toList(),
+            constraints: BoxConstraints(minHeight: 64, minWidth: 88),
+            children: bottomRowMap.entries
+                .map((ele) => _buildButtonContent(ele))
+                .toList(),
             onPressed: (value) async {
               await appState.refreshBonuses();
               setState(() {
-                appState.handleBonusAndText(value + 3);  // Offset by 3 for bottom row
+                appState.handleBonusAndText(
+                    value + 3); // Offset by 3 for bottom row
                 _selectedRolls = List.filled(6, false);
                 _selectedRolls[value + 3] = true;
               });
@@ -1288,9 +1841,9 @@ class _ToggleButtonsRollState extends State<ToggleButtonsRolls> {
         children: [
           Icon(
             ele.value,
-            size: 32,  // Larger icons
+            size: 32, // Larger icons
           ),
-          SizedBox(height: 4),  // Space between icon and text
+          SizedBox(height: 4), // Space between icon and text
           Text(
             ele.key,
             style: TextStyle(
@@ -1340,12 +1893,13 @@ class _HistoryListViewState extends State<HistoryListView> {
             child: Card(
               margin: EdgeInsets.symmetric(horizontal: 12, vertical: 4),
               child: ListTile(
-                leading: CircleAvatar( //TODO: make this a dice icon
+                leading: CircleAvatar(
+                  //TODO: make this a dice icon
+                  backgroundColor: theme.colorScheme.primaryContainer,
                   child: Text(
                     rollHistory.roll.toString(),
                     style: TextStyle(fontWeight: FontWeight.bold),
                   ),
-                  backgroundColor: theme.colorScheme.primaryContainer,
                 ),
                 title: Text(
                   '${rollHistory.rollType} Total: ${rollHistory.total}',

@@ -96,8 +96,7 @@ class BleDiceService {
         final nameLooksLikePixels =
             name.contains('pixel') || name.contains('die');
 
-        if (!completer.isCompleted &&
-            (serviceMatches || nameLooksLikePixels)) {
+        if (!completer.isCompleted && (serviceMatches || nameLooksLikePixels)) {
           completer.complete(device);
         }
       },
@@ -128,8 +127,8 @@ class BleDiceService {
     _connectedDevice = device;
 
     final serviceId = await _resolveServiceId(device, advertisedServices);
-    _usingLegacyService =
-        BleUuidParser.compareStrings(serviceId, PixelsBluetoothIds.legacyDieService);
+    _usingLegacyService = BleUuidParser.compareStrings(
+        serviceId, PixelsBluetoothIds.legacyDieService);
 
     final notifyId = _usingLegacyService
         ? PixelsBluetoothIds.legacyDieNotifyCharacteristic

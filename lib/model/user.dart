@@ -78,7 +78,8 @@ class RollBonuses {
       willBonus: parseIntField(json['willBonus'], 'willBonus'),
       casterLevel: parseIntField(json['casterLevel'], 'casterLevel'),
       maxHp: parseFirstOfKeys(['maxHp', 'hpMax', 'hp'], 'maxHp'),
-      maxTempHp: parseFirstOfKeys(['maxTempHp', 'tempHpMax', 'tempHp'], 'maxTempHp'),
+      maxTempHp:
+          parseFirstOfKeys(['maxTempHp', 'tempHpMax', 'tempHp'], 'maxTempHp'),
       currentTemp: parseIntField(json['currentTemp'], 'currentTemp'),
       currentHp: parseIntField(json['currentHp'], 'currentHp'),
       strScore: parseIntField(json['strScore'], 'strScore'),
@@ -97,8 +98,5 @@ class RollBonuses {
   }
 
   bool get hasAnyBonus =>
-      attackBonus != 0 ||
-      fortBonus != 0 ||
-      reflexBonus != 0 ||
-      willBonus != 0;
+      attackBonus != 0 || fortBonus != 0 || reflexBonus != 0 || willBonus != 0;
 }
